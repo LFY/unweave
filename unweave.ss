@@ -2,8 +2,7 @@
         (scheme-tools srfi-compat :1)
         (srfi :27)
         (delimcc-simple-ikarus)
-        (printing)
-        (only (scheme-tools) system))
+        (only (scheme-tools) system pretty-print))
 
 ;; Unweave: Probabilistic Programming with Constraint Solving
 
