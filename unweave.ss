@@ -1,5 +1,5 @@
 (import (rnrs)
-        (_srfi :1)
+        (scheme-tools srfi-compat :1)
         (srfi :27)
         (delimcc-simple-ikarus)
         (printing)
