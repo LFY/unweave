@@ -3,6 +3,7 @@
         (srfi :27)
         (delimcc-simple-ikarus)
         (printing)
+        (only (ikarus) fork waitpid)
         (only (scheme-tools) system))
 
 ;; Unweave: Probabilistic Programming with Constraint Solving
@@ -63,8 +64,6 @@
 
 (define (reify thunk)
   (reset (thunk)))
-
-
 
 ;; are pv nodes used to define choice points?
 
@@ -303,14 +302,127 @@
 (define initial-tree (reify (lambda () (geometric-gen))))
 
 ;; we need an odd number here?
-(define unfold5 (pv-unfold-by 9 initial-tree))
 
-(pretty-print unfold5)
-
-(for-each pretty-print (unfolded-tree->formula unfold5))
+;; (define unfold5 (pv-unfold-by 9 initial-tree))
+;; 
+;; (pretty-print unfold5)
+;; 
+;; (for-each pretty-print 
+;;           (unfolded-tree->formula unfold5))
 
 ;; TODO: 
 ;; 1. some way to communicate with Z3, obtain assignments, findall, etc.
+
+;; return value: an environment of assignments or #f (unsat)
+
+;; Creating temporary files
+
+(define (new-file-id)
+  (fork
+    (lambda (child-pid)
+      (let* ([status (waitpid child-pid)])
+        (number->string child-pid)))
+    (lambda () (exit))))
+
+(define (readlines filename)
+  (call-with-input-file filename
+    (lambda (p)
+      (let loop ((line (read-line p))
+                 (result '()))
+        (if (eof-object? line)
+            (reverse result)
+            (loop (read-line p) (cons line result)))))))
+
+(define (run-z3 stmts)
+  (define (gen-z3-file) (string-append "constr_" (new-file-id) ".ss"))
+  (define (gen-output-file) (string-append "output_" (new-file-id) ".ss"))
+  (let ([z3-script-file (gen-z3-file)]
+        [z3-output-file (gen-output-file)])
+    (system (format "rm -rf ~s" z3-script-file))
+    (with-output-to-file z3-script-file
+                         (lambda () (for-each (lambda (x) 
+                                                (display x) 
+                                                (newline))
+                                              stmts)))
+    (system (format "z3 -smt2 ~s > ~s" 
+                    z3-script-file 
+                    z3-output-file))
+    (let* ([lines (readlines z3-output-file)]
+           [sat-unsat (string->symbol (car lines))]
+           [assignment (let loop ([todo (cdr lines)]
+                                  [acc ""])
+                         (if (null? todo) acc
+                           (loop (cdr todo) 
+                                 (string-append acc (car todo)))))]
+           [assignment-expr (with-input-from-string assignment read)])
+      (list sat-unsat assignment-expr))))
+
+(pretty-print (run-z3
+  '((declare-const X0 Bool)
+    (declare-const B0 Bool)
+    (declare-const Y0 Int)
+    (declare-const X1 Bool)
+    (declare-const B2 Bool)
+    (declare-const Y1 Int)
+    (declare-const X2 Bool)
+    (declare-const B4 Bool)
+    (declare-const Y2 Int)
+    (declare-const X3 Bool)
+    (declare-const B6 Bool)
+    (declare-const Y3 Int)
+    (declare-const X4 Bool)
+    (declare-const B8 Bool)
+    (declare-const Y4 Int)
+    (declare-const Y5 Int)
+    (declare-const V4 Int)
+    (declare-const B9 Bool)
+    (declare-const V3 Int)
+    (declare-const B7 Bool)
+    (declare-const V2 Int)
+    (declare-const B5 Bool)
+    (declare-const V1 Int)
+    (declare-const B3 Bool)
+    (declare-const V0 Int)
+    (declare-const B1 Bool)
+    (assert (=> true (or (= X0 true) (= X0 false))))
+    (assert (= B0 (= X0 true)))
+    (assert (=> B0 (= Y0 0)))
+    (assert (=> B1 (or (= X1 true) (= X1 false))))
+    (assert (= B2 (= X1 true)))
+    (assert (=> B2 (= Y1 0)))
+    (assert (=> B3 (or (= X2 true) (= X2 false))))
+    (assert (= B4 (= X2 true)))
+    (assert (=> B4 (= Y2 0)))
+    (assert (=> B5 (or (= X3 true) (= X3 false))))
+    (assert (= B6 (= X3 true)))
+    (assert (=> B6 (= Y3 0)))
+    (assert (=> B7 (or (= X4 true) (= X4 false))))
+    (assert (= B8 (= X4 true)))
+    (assert (=> B8 (= Y4 0)))
+    (assert (=> B9 (= V4 (+ 1 Y5))))
+    (assert (= B9 (= X4 false)))
+    (assert (=> B9 (= Y4 V4)))
+    (assert (xor B9 B8))
+    (assert (=> B7 (= V3 (+ 1 Y4))))
+    (assert (= B7 (= X3 false)))
+    (assert (=> B7 (= Y3 V3)))
+    (assert (xor B7 B6))
+    (assert (=> B5 (= V2 (+ 1 Y3))))
+    (assert (= B5 (= X2 false)))
+    (assert (=> B5 (= Y2 V2)))
+    (assert (xor B5 B4))
+    (assert (=> B3 (= V1 (+ 1 Y2))))
+    (assert (= B3 (= X1 false)))
+    (assert (=> B3 (= Y1 V1)))
+    (assert (xor B3 B2))
+    (assert (=> B1 (= V0 (+ 1 Y1))))
+    (assert (= B1 (= X0 false)))
+    (assert (=> B1 (= Y0 V0)))
+    (assert (xor B1 B0))
+
+    (check-sat)
+    (get-model))))
+
 ;; 2. hook up query statements properly (Y0 == Result)
 ;; 3. source translation to the lazy trace-generating code (geometric-gen)
 ;; 4. test uninterpreted functions, lists
