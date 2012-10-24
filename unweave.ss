@@ -1,11 +1,9 @@
 (import (rnrs)
-        (_srfi :1)
+        (scheme-tools srfi-compat :1)
         (srfi :27)
         (delimcc-simple-ikarus)
-        (printing)
-        (program-pl)
         (only (ikarus) fork waitpid)
-        (only (scheme-tools) system))
+        (only (scheme-tools) system pretty-print))
 
 ;; Unweave: Probabilistic Programming with Constraint Solving
 
@@ -31,23 +29,23 @@
 
 (define (rnd-select pvs)
   (cond [(null? pvs) '()]
-        [else 
-          (letrec* ([smp (uniform 0 1)]
-                    [pvs* (zip (scan1 + (map car pvs)) pvs)]
-                    [iterator (lambda (pvs)
-                                (let* ([pv (car pvs)]
-                                       [p (car pv)]
-                                       [v (cadr pv)])
-                                  (cond [(< smp p) v]
-                                        [else (iterator (cdr pvs))])))])
-                   (iterator pvs*))]))
+        [else
+         (letrec* ([smp (uniform 0 1)]
+                   [pvs* (zip (scan1 + (map car pvs)) pvs)]
+                   [iterator (lambda (pvs)
+                               (let* ([pv (car pvs)]
+                                      [p (car pv)]
+                                      [v (cadr pv)])
+                                 (cond [(< smp p) v]
+                                       [else (iterator (cdr pvs))])))])
+                  (iterator pvs*))]))
 
 ;; dist, reify, etc.
 
 (define (every-other xs)
   (if (null? xs) '()
-    (cons (list (car xs) (cadr xs))
-          (every-other (cddr xs)))))
+      (cons (list (car xs) (cadr xs))
+            (every-other (cddr xs)))))
 
 (define (pv? e)
   (and (list? e) (not (null? e)) (equal? 'pv (car e))))
@@ -57,10 +55,10 @@
 (define (dist . vp-args)
   (let* ([pvs (map (lambda (vp) `(,(cadr vp) ,(car vp)))
                    (every-other vp-args))])
-    (shift k `(pv ,@(map (lambda (pv) 
+    (shift k `(pv ,@(map (lambda (pv)
                            `(,(car pv) ;; Probability
-                              ,(lambda () (k (cadr pv))) ;; Continuation
-                              ,(cadr pv))) ;; Sampled value
+                             ,(lambda () (k (cadr pv))) ;; Continuation
+                             ,(cadr pv))) ;; Sampled value
                          pvs)))))
 
 (define (reify thunk)
@@ -77,15 +75,14 @@
 (define (pv-prob p pv)
   `(pv ,@(map (lambda (pvs)
                 `(,(* p (car pvs))
-                   ,(cadr pvs)
-                   ,(caddr pvs)))
+                  ,(cadr pvs)
+                  ,(caddr pvs)))
               (pv->dist pv))))
 
 (define (contains-atom? a e)
   (cond [(pair? e)
          (or (contains-atom? a (car e))
              (contains-atom? a (cdr e)))]
-        [else (equal? a e)]))
 
 ;; (end Hansei duplication)
 
@@ -103,26 +100,26 @@
           [else v]))
   (define (unfold-atom pv)
     `(pv (,(car pv) ,(cadr pv) ,(caddr pv)
-                    ,(let* ([val (cadr pv)]
-                            [smp (caddr pv)]
-                            [prob (car pv)]
-                            [unexpanded (null? (cdddr pv))])
-                       (if unexpanded
-                         (cond [(procedure? val) 
-                                (let* ([res (val)]) (if (pv? res) (pv-prob prob res) res))]
-                               [(pair? val) (unfold-trace val)]
-                               [else val])
-                         (pv-unfold (cadddr pv)))))))
-  (cond 
-    [(pv? pv-tree) (let* ([choices (pv->dist pv-tree)]) (pv-concat (map unfold-atom choices)))]
-    [(procedure? pv-tree) (reset (pv-tree))]
-    [(pair? pv-tree) `(,(pv-unfold (car pv-tree)) . ,(pv-unfold (cdr pv-tree)))]
-    [else pv-tree]))
+          ,(let* ([val (cadr pv)]
+                  [smp (caddr pv)]
+                  [prob (car pv)]
+                  [unexpanded (null? (cdddr pv))])
+             (if unexpanded
+                 (cond [(procedure? val)
+                        (let* ([res (val)]) (if (pv? res) (pv-prob prob res) res))]
+                       [(pair? val) (unfold-trace val)]
+                       [else val])
+                 (pv-unfold (cadddr pv)))))))
+  (cond
+   [(pv? pv-tree) (let* ([choices (pv->dist pv-tree)]) (pv-concat (map unfold-atom choices)))]
+   [(procedure? pv-tree) (reset (pv-tree))]
+   [(pair? pv-tree) `(,(pv-unfold (car pv-tree)) . ,(pv-unfold (cdr pv-tree)))]
+   [else pv-tree]))
 
 (define (pv-unfold-by n pv-tree)
   (if (= n 0) pv-tree
-    (let* ([next-tree (pv-unfold pv-tree)])
-      (pv-unfold-by (- n 1) next-tree))))
+      (let* ([next-tree (pv-unfold pv-tree)])
+        (pv-unfold-by (- n 1) next-tree))))
 
 
 ;; Converts an unfolded trace/search tree to a formula.
@@ -167,9 +164,9 @@
       res))
 
   (define (add-stmt-once! stmt)
-    (if (not (member stmt stmts)) 
-      (add-stmt! stmt)
-      '()))
+    (if (not (member stmt stmts))
+        (add-stmt! stmt)
+        '()))
 
   (define (recur? v) (equal? "R" (substring (symbol->string v) 0 1)))
 
@@ -195,11 +192,11 @@
 
   (define (all p xs)
     (if (null? xs) #t
-      (and (p (car xs)) (all p (cdr xs)))))
+        (and (p (car xs)) (all p (cdr xs)))))
 
   (define (some p xs)
     (if (null? xs) #f
-      (or (p (car xs)) (some p (cdr xs)))))
+        (or (p (car xs)) (some p (cdr xs)))))
 
   (define (lookup-type v)
     (cond [(and (number? v) (exact? v)) 'Int]
@@ -207,8 +204,8 @@
           [(boolean? v) 'Bool]
           [(symbol? v) (let ([lookup-result (assoc v type-cxt)])
                          (if lookup-result
-                           (cdr lookup-result)
-                           'A))]
+                             (cdr lookup-result)
+                             'A))]
           [else 'A]))
 
   ;; type inference (FIXME: only sort of works in very limited cases)
@@ -216,8 +213,8 @@
     (let* ([arg-types (map lookup-type args)])
       (cond [(member f '(+ - * expt))
              (let* ([res-type (if (all (lambda (t) (not (equal? t 'Real))) arg-types)
-                                'Int
-                                'Real)])
+                                  'Int
+                                  'Real)])
                (for-each (lambda (val type)
                            (if (and (not (number? val)) (equal? 'A type))
                              (begin
@@ -234,14 +231,14 @@
   (define (infer-arg-types f result-type args)
     (cond [(member f '(+ - * expr))
            (if (equal? result-type 'Int)
-             (map (constantly 'Int) args)
-             (map (constantly 'Real) args))]
+               (map (constantly 'Int) args)
+               (map (constantly 'Real) args))]
           [(member f '(log exp sin cos tan))
            (map (constantly 'Real) args)]
           [else (map (constantly 'A) args)]))
 
   (define (E expr control-var)
-    (cond [(pv? expr) 
+    (cond [(pv? expr)
            (let* ([v (next-var)]
                   [y (next-ret)]
                   [choices (pv->dist expr)]
@@ -275,9 +272,9 @@
                              )))
                        choices)
              (if (not (null? these-branch-vars))
-               (add-stmt! `(assert (xor ,@these-branch-vars))))
+                 (add-stmt! `(assert (xor ,@these-branch-vars))))
              y)]
-          [(procedure? expr) 
+          [(procedure? expr)
            (let* ([var (next-recur)])
              var)]
           [(pair? expr)
@@ -285,7 +282,7 @@
                   [f (car expr)]
                   [vals (map (lambda (x) (E x control-var)) (cdr expr))]
                   [type-of-v (infer-type f vals)])
-             
+
              (extend-type-cxt! (cons v type-of-v))
              (add-stmt! `(declare-const ,v ,type-of-v))
 
@@ -316,8 +313,8 @@
 
 (define (geometric-gen)
   (if (dist #t 0.5 #f 0.5)
-     0
-     `(+ 1 ,(lambda () (geometric-gen)))))
+      0
+      `(+ 1 ,(lambda () (geometric-gen)))))
 
 (define (model)
   (if (dist #t 0.5 #f 0.5)
