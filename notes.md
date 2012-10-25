@@ -1,11 +1,11 @@
-Dealing with recursive calls.
+## Dealing with recursive calls
 
-1. Treat the recursive call as an uninterpreted function symbol. This has
+**Option A** Treat the recursive call as an uninterpreted function symbol. This has
 issues with probabilistic programs, since the SMT solver does not allow
 _nondeterministic_ functions out of the box, i.e., it does not account for
 (geometric-gen ()) != (geometric-gen ()). Not too clear how to deal with this.
 
-2. Track which function is being called at the point of recursion. Once we
+**Option B** Track which function is being called at the point of recursion. Once we
 get a satisfying assignment for our partially-unrolled trace, i.e., for the
 constraint C1 = (= 10 (geometric-gen)):
 
@@ -40,13 +40,14 @@ If our goal is to simply generate satisfying assignments with the right
 probability, probability, however, it might not be so bad---there is no
 database, we are just exploring forward gradually.
 
-Inference algorithms.
+## Inference algorithms
 
 Look-ahead importance sampling
 given a query stmt:
-step 1. unfold the tree, convert to formula
-step 2. gather satisfying assignments for the first choice, weight by probability
-step 3. sample from that
-step 4. pick the subtree corresponding to that choice. goto 1.
+
+1. unfold the tree, convert to formula
+2. gather satisfying assignments for the first choice, weight by probability
+3. sample from that
+4. pick the subtree corresponding to that choice. goto 1.
 
 
