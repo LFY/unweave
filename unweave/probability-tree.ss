@@ -73,6 +73,16 @@
  ;;         <thunk> ;; recursion
  ;;         (pv ... ;; another choice following in control flow
 
+ ;; (define (pv-unfold2 pv-tree)
+ ;;   (define (unfold-trace v)
+ ;;     (cond [(null? v) '()]
+ ;;           [(procedure? v) (reify (lambda () (v)))]
+ ;;           [(pair? v) (cond [(equal? 'continue (car v))
+ ;;                             (let* ([call (cadr v)]
+ ;;                                    [proc (caddr v)])
+ ;;                               `(,call ,(proc))]
+ ;;                             [else `(,(unfold-trace (car v)) . 
+
  (define (pv-unfold pv-tree)
    (define (unfold-trace v)
      (cond [(null? v) '()]

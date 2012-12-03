@@ -4,7 +4,8 @@
 
  (unweave random-primitives)
 
- (export rnd-select)
+ (export rnd-select
+         random-integer)
 
  (import (rnrs)
          (srfi :27)

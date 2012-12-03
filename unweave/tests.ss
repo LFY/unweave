@@ -35,15 +35,8 @@
 
    ;; we need an odd number here?
 
-   (define unfold5 (pv-unfold-by 2 initial-tree))
-
-   (define test-formula (unfolded-tree->formula unfold5))
-
    (define test-query (lambda (result)
                         `(= ,result 10)))
-
-   (pretty-print unfold5)
-   (for-each pretty-print test-formula)
 
    ;; (pretty-print (run-z3 (append test-formula (list '(check-sat) '(get-model)))))
 
@@ -52,9 +45,10 @@
    ;; Introducing query/constraint statements
    ;; query: just an SMT 2.0 assert formula on the return value
 
-   (for-each pretty-print
-             (incremental-unfold test-query
-                                 (reify (lambda () (model)))
-                                 10)))
-
+   (pretty-print initial-tree)
+   (pretty-print (pv-unfold initial-tree))
+   (pretty-print (unfolded-tree->formula (pv-unfold initial-tree)))
+   (pretty-print (pv-unfold (pv-unfold initial-tree)))
+   ;; (for-each pretty-print (incremental-unfold test-query initial-tree 10)))
+   )
  )

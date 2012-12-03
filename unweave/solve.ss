@@ -25,13 +25,9 @@
      (if (= depth max-depth) 'done
          (let* ([formula (unfolded-tree->formula curr-tree)]
                 [model (run-z3 (append formula
-                                       (list `(assert ,(query 'Y0))
+                                       (list `(assert ,(query 'Y1))
                                              '(check-sat)
                                              '(get-model))))])
-           (pretty-print 'tree-and-formula)
-           (pretty-print curr-tree)
-           (pretty-print formula)
-
            (if (equal? 'sat (car model))
                (begin
                  (set! models (cons model models))

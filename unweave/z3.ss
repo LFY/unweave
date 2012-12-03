@@ -8,7 +8,8 @@
 
  (unweave z3)
 
- (export run-z3)
+ (export run-z3
+         z3-result->assignment)
 
  (import (rnrs)
          (only (scheme-tools) system format)
@@ -55,5 +56,24 @@
        (system (format "rm ~s" z3-script-file))
        (system (format "rm ~s" z3-output-file))
        (list sat-unsat assignment-expr))))
+
+ (define (z3-result->assignment assignment-expr)
+   (define (convert-val v)
+     (cond [(and (pair? v) (= (length v) 2))
+            (if (equal? '- (car v))
+              (- (cadr v))
+              v)]
+           [(member v '(true false)) (if (equal? 'true v) #t #f)]
+           [else v]))
+   (define (decl->var-val-type d)
+     (let* ([var-name (cadr d)]
+            [arg-types (caddr d)]
+            [result-type (cadddr d)]
+            [val (convert-val (cadddr (cdr d)))]
+            [final-type (if (null? arg-types) result-type
+                          `(,@arg-types ,result-type))])
+       (list var-name val final-type)))
+   (map decl->var-val-type assignment-expr))
+
 
  )
