@@ -154,129 +154,139 @@
    (define (E ex env addr lazy? control-env)
      (cond
       ;; Associate a SMT variable with every address.
-      [(if? ex) (explode-if ex (lambda (l c t e)
-                                 (let* ([Cv (next-control addr)]
-                                        ;; invariant: once we've retrieved the variable from calling E on something, we also have access to the actual sampled value.
-                                        [Vv (E c env addr lazy? control-env)]
-                                        ;; record the value of the control variable.
-                                        [void (inst-val-type! Cv (get-val Vv))]
-                                        [eval-T? (get-val Vv)]
-                                        [Rv (next-ret addr)]
-                                        [Tv (E t env (cons l addr) (not eval-T?) (env-update Cv #t control-env))]
-                                        [Ev (E e env (cons l addr) eval-T? (env-update Cv #f control-env))])
-                                   (add-stmt! `(assert (and (= ,Cv ,Vv) (=> ,Cv (= ,Rv ,Tv)) ;; constraint representing then-branch
-                                                            (=> (not ,Cv) (= ,Rv ,Ev))))) ;; else-branch
-                                   (inst-val-type! Rv (if eval-T? (get-val Tv) (get-val Ev)))
-                                   Rv)))]
-      [(assert? ex) (explode-assert ex (lambda (l b)
-                                         (let* ([Av (next-assert addr)]
-                                                [Bv (E b env (cons l addr) lazy? control-env)])
-                                           (inst-type! Av 'Bool)
-                                           (add-stmt!  `(assert (and (= ,Av ,Bv) (= ,Av #t))))
-                                           Bv)))]
-      [(lambda? ex) (explode-lambda ex (lambda (l vs c) `(closure (lambda ,l ,vs ,c ,@(if (has-type-annotation? ex) (list (lambda->return-type ex)) '())) ,env)))]
-      [(factor? ex) (explode-factor ex (lambda (lab formals call)
-                                         `(factor-closure (lambda ,lab ,(cons 'temp formals)
-                                                             (call ,lab (ref ,lab *) (ref ,lab temp) ,call)) ,env)))]
-      [(letrec? ex) (explode-letrec ex (lambda (l bs call)
-                                         (let* ([local-binding-env
-                                                 (fold (lambda (b e)
-                                                         (extend e (car b) (E (cadr b) e addr lazy? control-env)))
-                                                       env bs)]
-                                                [res (E call local-binding-env addr lazy? control-env)])
-                                           res)))]
+      [(if? ex)
+       (explode-if ex (lambda (l c t e)
+                        (let* ([Cv (next-control addr)]
+                               ;; invariant: once we've retrieved the variable from calling E on something, we also have access to the actual sampled value.
+                               [Vv (E c env addr lazy? control-env)]
+                               ;; record the value of the control variable.
+                               [void (inst-val-type! Cv (get-val Vv))]
+                               [eval-T? (get-val Vv)]
+                               [Rv (next-ret addr)]
+                               [Tv (E t env (cons l addr) (not eval-T?) (env-update Cv #t control-env))]
+                               [Ev (E e env (cons l addr) eval-T? (env-update Cv #f control-env))])
+                          (add-stmt! `(assert (and (= ,Cv ,Vv) (=> ,Cv (= ,Rv ,Tv)) ;; constraint representing then-branch
+                                                   (=> (not ,Cv) (= ,Rv ,Ev))))) ;; else-branch
+                          (inst-val-type! Rv (if eval-T? (get-val Tv) (get-val Ev)))
+                          Rv)))]
+      [(assert? ex)
+       (explode-assert ex (lambda (l b)
+                            (let* ([Av (next-assert addr)]
+                                   [Bv (E b env (cons l addr) lazy? control-env)])
+                              (inst-type! Av 'Bool)
+                              (add-stmt!  `(assert (and (= ,Av ,Bv) (= ,Av #t))))
+                              Bv)))]
+      [(lambda? ex)
+       (explode-lambda ex (lambda (l vs c) `(closure (lambda ,l ,vs ,c ,@(if (has-type-annotation? ex) (list (lambda->return-type ex)) '())) ,env)))]
+      [(factor? ex)
+       (explode-factor ex (lambda (lab formals call)
+                            `(factor-closure (lambda ,lab ,(cons 'temp formals)
+                                                (call ,lab (ref ,lab *) (ref ,lab temp) ,call)) ,env)))]
+      [(letrec? ex)
+       (explode-letrec ex (lambda (l bs call)
+                            (let* ([local-binding-env
+                                    (fold (lambda (b e)
+                                            (extend e (car b) (E (cadr b) e addr lazy? control-env)))
+                                          env bs)]
+                                   [res (E call local-binding-env addr lazy? control-env)])
+                              res)))]
       [(rv? ex) (rv->val ex)]
-      [(call? ex) (explode-call ex (lambda (l f vs)
-                                     (let* ([Vv (next-call (cons l addr))]
-                                            [proc (E f env (cons l addr) lazy? control-env)]
-                                            [vals (map (lambda (v) (E v env (cons l addr) lazy? control-env)) vs)])
-                                       (cond [(or (factor-closure? proc)
-                                                  (closure? proc))
-                                              (explode-closure proc (lambda (lam env2)
-                                                                      (let* ([combined-env (append (if (list? (lambda->formals lam))
-                                                                                                       (map cons (lambda->formals lam)
-                                                                                                            (if (factor-closure? proc)
-                                                                                                                (append (cons 1.0 (cdr vals)))
-                                                                                                                vals))
-                                                                                                       (cons (lambda->formals lam) vals))
-                                                                                                   env2 env)])
-                                                                        (if lazy?
-                                                                            ;; save a thunk that performs the next step of computation.
-                                                                            (let* ([res-thunk (lambda ()
-                                                                                                (let* ([next-res (E (lambda->call lam) combined-env (cons l addr) #t control-env)])
-                                                                                                  (add-stmt! `(assert (= ,Vv ,next-res)))
-                                                                                                  next-res))]
-                                                                                   [void (set! continue-thunks (cons res-thunk continue-thunks))]
-                                                                                   [Rv (next-recursion-flag (cons l addr))]
-                                                                                   [Fv (new-call-name (cons l addr))])
-                                                                              (let*
-                                                                                  ([recursion-condition
-                                                                                    `(assert (= ,Rv ,(if (null? control-env) #t
-                                                                                                         `(and ,@(map (lambda (var-val)
-                                                                                                                        `(= ,(car var-val) ,(cdr var-val)))
-                                                                                                                      control-env)))))]
-                                                                                   [recursion-definition `(assert (=> ,Rv (= ,Vv ,(if (null? vals)
-                                                                                                                                      Fv
-                                                                                                                                      `(,Fv ,@vals)))))])
-                                                                                (inst-type! Rv 'Bool)
-                                                                                (add-stmt! recursion-condition)
-                                                                                (add-stmt! recursion-definition)
-                                                                                (set! continue-thunks (cons res-thunk continue-thunks))
-                                                                                (set! deletion-thunks
-                                                                                      (cons
-                                                                                       (lambda ()
-                                                                                         (set-car! (cdr recursion-condition) #t)
-                                                                                         (set-car! (cdr recursion-definition) #t))
-                                                                                       deletion-thunks))
-                                                                                '())
+      [(call? ex)
+       (explode-call ex (lambda (l f vs)
+                          (let* ([Vv (next-call (cons l addr))]
+                                 [proc (E f env (cons l addr) lazy? control-env)]
+                                 [vals (map (lambda (v) (E v env (cons l addr) lazy? control-env)) vs)])
+                            (cond [(or (factor-closure? proc)
+                                       (closure? proc))
+                                   (explode-closure proc (lambda (lam env2)
+                                                           (let* ([combined-env (append (if (list? (lambda->formals lam))
+                                                                                            (map cons (lambda->formals lam)
+                                                                                                 (if (factor-closure? proc)
+                                                                                                     (append (cons 1.0 (cdr vals)))
+                                                                                                     vals))
+                                                                                            (cons (lambda->formals lam) vals))
+                                                                                        env2 env)])
+                                                             (if lazy?
+                                                                 ;; save a thunk that performs the next step of computation.
+                                                                 (let* ([res-thunk (lambda ()
+                                                                                     (let* ([next-res (E (lambda->call lam) combined-env (cons l addr) #t control-env)])
+                                                                                       (add-stmt! `(assert (= ,Vv ,next-res)))
+                                                                                       next-res))]
+                                                                        [void (set! continue-thunks (cons res-thunk continue-thunks))]
+                                                                        [Rv (next-recursion-flag (cons l addr))]
+                                                                        [Fv (new-call-name (cons l addr))])
+                                                                   (let*
+                                                                       ([recursion-condition
+                                                                         `(assert (= ,Rv ,(if (null? control-env) #t
+                                                                                              `(and ,@(map (lambda (var-val)
+                                                                                                             `(= ,(car var-val) ,(cdr var-val)))
+                                                                                                           control-env)))))]
+                                                                        [recursion-definition `(assert (=> ,Rv (= ,Vv ,(if (null? vals)
+                                                                                                                           Fv
+                                                                                                                           `(,Fv ,@vals)))))])
+                                                                     (inst-type! Rv 'Bool)
+                                                                     (add-stmt! recursion-condition)
+                                                                     (add-stmt! recursion-definition)
+                                                                     (set! continue-thunks (cons res-thunk continue-thunks))
+                                                                     (set! deletion-thunks
+                                                                           (cons
+                                                                            (lambda ()
+                                                                              (set-car! (cdr recursion-condition) #t)
+                                                                              (set-car! (cdr recursion-definition) #t))
+                                                                            deletion-thunks))
+                                                                     '())
 
-                                                                              (if (has-type-annotation? lam)
-                                                                                  (let* ([type (lambda->return-type lam)])
-                                                                                    (inst-type! Vv (last type))
-                                                                                    (inst-type! Fv type)))
-                                                                              (inst-lazy-val! Vv `(,(addr->func-name (list (lambda->lab lam))) ,@vals))
-                                                                              Vv)
-                                                                            (let* ([res (E (lambda->call lam) combined-env (cons l addr) lazy? control-env)])
-                                                                              (add-stmt! `(assert (= ,Vv ,res)))
-                                                                              (if (all (lambda (x) (not (lazy-var? x))) vals)
-                                                                                  (inst-val-type! Vv (if (var? res) (get-val res) res)))
-                                                                              Vv)))))]
-                                             [(procedure? proc)
-                                              (if lazy?
-                                                  (begin
-                                                    (add-stmt! `(assert (= ,Vv (,(ref->var f) ,@vals))))
-                                                    ;; type inference is needed here (for primitive functions)
-                                                    (inst-type! Vv (infer-return-type (ref->var f) vals))
-                                                    Vv)
-                                                  (begin
-                                                    (add-stmt! `(assert (= ,Vv (,(ref->var f) ,@vals))))
-                                                    (if (all (lambda (x) (not (lazy-var? x)))
-                                                             vals)
-                                                        (inst-val-type! Vv (apply proc (map (lambda (v) (if (var? v) (get-val v) v))
-                                                                                            vals))))
-                                                    Vv))]
-                                             [else (pretty-print `(error-in-call-norm-eval ,proc))]))))]
-      [(ref? ex) (let* ([lookup-res (lookup env (ref->var ex))])
-                   (if (not-found? lookup-res)
-                       (cond [(rv? lookup-res)
-                              (list-ref lookup-res 5)]
-                             [else lookup-res])
-                       lookup-res))]
-      [(xrp? ex) (explode-xrp ex (lambda (lab scorer name prop-fx-name params)
-                                   (let* ([Xv (next-choice (cons lab addr))]
-                                          [Ev (next-choice-existence (cons lab addr))]
-                                          [param-vals (map (lambda (p) (E p env addr lazy? control-env)) params)])
-                                     (inst-type! Ev 'Bool)
-                                     (add-stmt! `(assert (= ,Ev ,(if (null? control-env) #t
-                                                                     `(and ,@(map (lambda (var-val)
-                                                                                    `(= ,(car var-val) ,(cdr var-val)))
-                                                                                  control-env))))))
-                                     (add-stmt! `(assert (=> ,Ev (or ,@(map (lambda (v) `(= ,Xv ,v)) param-vals)))))
-                                     ;; just do a uniform selection for now
-                                     (inst-val-type! Xv (uniform-select param-vals))
-                                     Xv)))]
-      [(const? ex) (explode-const ex (lambda (lab c) (if (null? c) 'nil c)))]
+                                                                   (if (has-type-annotation? lam)
+                                                                       (let* ([type (lambda->return-type lam)])
+                                                                         (inst-type! Vv (last type))
+                                                                         (inst-type! Fv type)))
+                                                                   (inst-lazy-val! Vv `(,(addr->func-name (list (lambda->lab lam))) ,@vals))
+                                                                   Vv)
+                                                                 (let* ([res (E (lambda->call lam) combined-env (cons l addr) lazy? control-env)])
+                                                                   (add-stmt! `(assert (= ,Vv ,res)))
+                                                                   (if (all (lambda (x) (not (lazy-var? x))) vals)
+                                                                       (inst-val-type! Vv (if (var? res) (get-val res) res)))
+                                                                   Vv)))))]
+                                  [(procedure? proc)
+                                   (if lazy?
+                                       (begin
+                                         (add-stmt! `(assert (= ,Vv (,(ref->var f) ,@vals))))
+                                         ;; type inference is needed here (for primitive functions)
+                                         (inst-type! Vv (infer-return-type (ref->var f) vals))
+                                         Vv)
+                                       (begin
+                                         (add-stmt! `(assert (= ,Vv (,(ref->var f) ,@vals))))
+                                         (if (all (lambda (x) (not (lazy-var? x)))
+                                                  vals)
+                                             (inst-val-type! Vv (apply proc (map (lambda (v) (if (var? v) (get-val v) v))
+                                                                                 vals))))
+                                         Vv))]
+                                  [else (pretty-print `(error-in-call-norm-eval ,proc))]))))]
+      [(ref? ex)
+       (let* ([lookup-res (lookup env (ref->var ex))])
+         (if (not-found? lookup-res)
+             (cond [(rv? lookup-res)
+                    (list-ref lookup-res 5)]
+                   [else lookup-res])
+             lookup-res))]
+      [(xrp? ex)
+       (explode-xrp ex (lambda (lab scorer name prop-fx-name params)
+                         (let* ([Xv (next-choice (cons lab addr))]
+                                [Ev (next-choice-existence (cons lab addr))]
+                                [param-vals (map (lambda (p) (E p env addr lazy? control-env)) params)])
+                           (inst-type! Ev 'Bool)
+                           (add-stmt! `(assert (= ,Ev ,(if (null? control-env) #t
+                                                           `(and ,@(map (lambda (var-val)
+                                                                          `(= ,(car var-val) ,(cdr var-val)))
+                                                                        control-env))))))
+                           (add-stmt! `(assert (=> ,Ev (or ,@(map (lambda (v) `(= ,Xv ,v)) param-vals)))))
+                           ;; just do a uniform selection for now
+                           (inst-val-type! Xv (uniform-select param-vals))
+                           Xv)))]
+      [(const? ex)
+       (explode-const ex (lambda (lab c) (if (null? c) 'nil c)))]
       [else ex]))
+
    (let* ([final-var (E ex env addr #f '())])
      (letrec ([refresh-state (lambda ()
                                (make-state final-var var-val-map var-type-map lazy-map continue-thunks deletion-thunks stmts refresh-state))])
@@ -372,8 +382,10 @@
    (define body `(assert (,constraint ,program)))
    (define labeled-body (label-transform body))
    (define labeled-env
-     (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e)) (cdr v-e)
-                                       (label-transform (cdr v-e))))) default-env))
+     (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e))
+                                       (cdr v-e)
+                                       (label-transform (cdr v-e)))))
+          default-env))
 
    (define initial-state (smt-evaluator labeled-body labeled-env '(top)))
 
