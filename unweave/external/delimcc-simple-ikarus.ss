@@ -1,3 +1,4 @@
+#!r6rs
 
 ;; Delimited continuation operators shift/reset
 ;; From http://okmij.org/ftp/continuations/implementations.html#delimcc-scheme
