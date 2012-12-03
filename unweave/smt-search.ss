@@ -1,5 +1,6 @@
 (library (unweave smt-search)
-         (export smt-solve)
+         (export smt-solve
+                 run-smt)
 
          (import (rnrs)
                  (only (ikarus) set-car!)
@@ -21,7 +22,17 @@
 
 ;; Our state
 (define (smt-evaluator ex env addr)
- 
+
+  (define (type-parameter? s)
+    (member s '(A B C D E F G H I J K L M)))
+
+  (define (contains-type-parameter? t)
+    (if (null? t) #f
+      (if (pair? t)
+        (or (contains-type-parameter? (car t))
+            (contains-type-parameter? (cdr t)))
+        (type-parameter? t))))
+
   ;; Assertions (for SMT solver)
   (define stmts '())
   (define continue-thunks '())
@@ -62,15 +73,37 @@
     (hash-table-set! var-val-map var val))
 
   (define (val->type val)
-    (cond [(pair? val) 'List]
-          [(null? val) 'List]
-          [(number? val) (cond [(exact? val) 'Int]
-                               [(inexact? val) 'Real]
-                               [else 'Real])]
-          [(boolean? val) 'Bool]
-          [(string? val) 'String]
-          [(symbol? val) 'Symbol]
-          [else 'UNKNOWN-TYPE]))
+
+    (define (proper-list? xs)
+      (if (or (null? xs) (pair? xs))
+        (if (null? (cdr xs)) 
+          #t
+          (proper-list? (cdr xs)))
+          #f))
+
+    (define (list->ground-type xs)
+      (let* ([elt-type (val->type (car xs))])
+        `(Lst ,elt-type)))
+
+    ;; FIXME
+    (define (improper-list->ground-type xs)
+      `(ImpLst ,(cadr (list->ground-type xs))))
+
+    (let* ([result (cond [(pair? val) (if (proper-list? val) 
+                                        (list->ground-type val)
+                                        (improper-list->ground-type val))]
+                         [(null? val) '(Lst A)]
+                         [(number? val) (cond [(exact? val) 'Int]
+                                              [(inexact? val) 'Real]
+                                              [else 'Real])]
+                         [(boolean? val) 'Bool]
+                         [(string? val) 'String]
+                         [(symbol? val) 'Symbol]
+                         [else (begin
+                                 (pretty-print `(unknown! ,val))
+                                 'UNKNOWN-TYPE)])])
+      (pretty-print `(val->type ,val ,result))
+      result))
 
   (define (inst-val-type! var val)
     (let* ([type (val->type val)])
@@ -92,7 +125,7 @@
   (define (get-type var)
     (if (var? var)
       (hash-table-ref var-type-map var (lambda () 'unknown))
-      var))
+      (val->type var)))
 
   (define (new-call-name addr) (addr->var addr 'F))
   (define (next-control addr) (addr->var addr 'C))
@@ -143,6 +176,7 @@
       (cons `(,var . ,val) env)))
 
   (define (infer-return-type prim var-vals) 
+    (pretty-print `(infer ,prim ,@var-vals))
     (let* ([types (map (lambda (var-val)
                          (if (var? var-val)
                            (get-type var-val)
@@ -150,12 +184,42 @@
                        var-vals)])
       (cond [(member prim '(+ - / *)) (if (all (lambda (x) (equal? x 'Int)) types) 'Int 'Real)]
             [(member prim '(and or not)) 'Bool]
-            [else 'UNKNOWN-TYPE])))
+            [(equal? prim 'cons) (let* ([type
+                                          `(Lst ,(let* ([var-val (car var-vals)])
+                                           (if (var? var-val) 
+                                             (get-type var-val)
+                                             (val->type var-val))))]
+                                        [rest-var-val (cadr var-vals)])
+                                   (pretty-print `(inst-type! ,rest-var-val ,type))
+                                   (inst-type! rest-var-val type)
+                                   type)]
+            [(equal? prim 'cdr) (let* ([var-val (car var-vals)])
+                                  (if (var? var-val)
+                                    (get-type var-val)
+                                    (val->type var-val)))]
+            [(equal? prim 'car) (let* ([var-val (car var-vals)])
+                                  (let* ([type (if (var? var-val)
+                                               (get-type var-val)
+                                               (val->type var-val))])
+                                  (cadr type)))]
+            [(equal? prim 'null?) 'Bool]
+            [(member prim '(> < = <= >=)) 'Bool]
+            [else (begin
+                    (pretty-print `(unknown: (,prim ,@var-vals)))
+                    'UNKNOWN-TYPE)])))
+
+  (define (convert-prim f args)
+    (if (equal? 'null? f) 
+      `(= nil ,@args)
+      `(,f ,@args)))
 
   (define (E ex env addr lazy? control-env) 
     (cond
       ;; Associate a SMT variable with every address.
+      ;; FIXME: Account for evaluating if-statements in lazy mode
+      ;; if we're lazy, we'd like to still record if-statements, but not actually use the real value of the control variable.
       [(if? ex) (explode-if ex (lambda (l c t e) 
+                                 (if (not lazy?)
         (let* ([Cv (next-control addr)]
                ;; invariant: once we've retrieved the variable from calling E on something, we also have access to the actual sampled value.
                [Vv (E c env addr lazy? control-env)]
@@ -167,8 +231,27 @@
                [Ev (E e env (cons l addr) eval-T? (env-update Cv #f control-env))])
           (add-stmt! `(assert (and (= ,Cv ,Vv) (=> ,Cv (= ,Rv ,Tv)) ;; constraint representing then-branch
                                    (=> (not ,Cv) (= ,Rv ,Ev))))) ;; else-branch
-          (inst-val-type! Rv (if eval-T? (get-val Tv) (get-val Ev)))
-          Rv)))]
+          (inst-type! Rv (if (contains-type-parameter? (get-type Tv))
+                           (get-type Ev)
+                           (get-type Tv)))
+          (pretty-print `(inst-type! ,Rv (if ,eval-T? ,(get-type Tv) ,(get-type Ev))))
+          (inst-val! Rv (if eval-T? (get-val Tv) (get-val Ev)))
+          Rv)
+        (let* ([Cv (next-control addr)]
+               ;; invariant: once we've retrieved the variable from calling E on something, we also have access to the actual sampled value.
+               [Vv (E c env addr lazy? control-env)]
+               ;; record the value of the control variable.
+               [void (inst-type! Cv 'Bool)]
+               [Rv (next-ret addr)]
+               [Tv (E t env (cons l addr) #t (env-update Cv #t control-env))]
+               [Ev (E e env (cons l addr) #t (env-update Cv #f control-env))])
+          (add-stmt! `(assert (and (= ,Cv ,Vv) (=> ,Cv (= ,Rv ,Tv)) ;; constraint representing then-branch
+                                   (=> (not ,Cv) (= ,Rv ,Ev))))) ;; else-branch
+          (inst-type! Rv (if (contains-type-parameter? (get-type Tv))
+                           (get-type Ev)
+                           (get-type Tv)))
+          Rv)
+        )))]
       [(assert? ex) (explode-assert ex (lambda (l b)
                                          (let* ([Av (next-assert addr)]
                                                 [Bv (E b env (cons l addr) lazy? control-env)])
@@ -191,6 +274,7 @@
       (let* ([Vv (next-call (cons l addr))]
              [proc (E f env (cons l addr) lazy? control-env)]
              [vals (map (lambda (v) (E v env (cons l addr) lazy? control-env)) vs)])
+        (pretty-print `(call ,Vv ,f ,vals))
         (cond [(or (factor-closure? proc)
                    (closure? proc)) 
                (explode-closure proc (lambda (lam env2)
@@ -243,25 +327,30 @@
                                                       (inst-val-type! Vv (if (var? res) (get-val res) res)))
                                                   Vv)))))]
               [(procedure? proc) 
-               (if lazy?
-                 (begin
-                   (add-stmt! `(assert (= ,Vv (,(ref->var f) ,@vals))))
-                   ;; type inference is needed here (for primitive functions)
-                   (inst-type! Vv (infer-return-type (ref->var f) vals))
-                   Vv)
-                 (begin
-                   (add-stmt! `(assert (= ,Vv (,(ref->var f) ,@vals))))
-                   (if (all (lambda (x) (not (lazy-var? x)))
-                            vals)
-                     (inst-val-type! Vv (apply proc (map (lambda (v) (if (var? v) (get-val v) v))
-                                                         vals))))
-                   Vv))]
+               (begin
+                 (add-stmt! `(assert (= ,Vv ,(convert-prim (ref->var f) vals))))
+                 (if lazy?
+                   (begin
+                     (pretty-print `(proc-lazy ,Vv ,(ref->var f) ,@vals))
+                     ;; type inference is needed here (for primitive functions)
+                     (inst-type! Vv (infer-return-type (ref->var f) vals))
+                     Vv)
+                   (begin
+                     (pretty-print `(proc-eager ,Vv ,(ref->var f) ,@vals))
+                     (inst-type! Vv (infer-return-type (ref->var f) vals))
+                     (if (all (lambda (x) (not (lazy-var? x)))
+                              vals)
+                       (inst-val-type! Vv (apply proc (map (lambda (v) (if (var? v) (get-val v) v))
+                                                           vals))))
+                     Vv)))]
               [else (pretty-print `(error-in-call-norm-eval ,proc))]))))]
       [(ref? ex) (let* ([lookup-res (lookup env (ref->var ex))])
                    (if (not-found? lookup-res) 
-                     (cond [(rv? lookup-res)
-                            (list-ref lookup-res 5)]
-                           [else lookup-res])
+                     (begin
+                       (pretty-print `(not-found: ,lookup-res ,(ref->var ex)))
+                       (cond [(rv? lookup-res)
+                              (list-ref lookup-res 5)]
+                             [else lookup-res]))
                      lookup-res))]
       [(xrp? ex) (explode-xrp ex (lambda (lab scorer name prop-fx-name params)
         (let* ([Xv (next-choice (cons lab addr))]
@@ -276,7 +365,7 @@
           ;; just do a uniform selection for now
           (inst-val-type! Xv (uniform-select param-vals))
           Xv)))]
-      [(const? ex) (explode-const ex (lambda (lab c) (if (null? c) 'nil c)))]
+      [(const? ex) (explode-const ex (lambda (lab c) (if (null? c) '() c)))]
     [else ex]))
 (let* ([final-var (E ex env addr #f '())])
   (letrec ([refresh-state (lambda () 
@@ -320,16 +409,24 @@
          (let* ([var (car var-type)]
                 [type (cdr var-type)])
            (if (pair? type)
-             `(declare-fun ,var ,(let* ([arg-type (init type)]
-                                        [unit? (and (null? (car arg-type))
-                                                    (= (length arg-type) 1))])
-                                   (if unit? '()
-                                     arg-type))
-                           ,(last type))
+             (if (equal? '-> (car type))
+               (let* ([type-body (cdr type)])
+                 `(declare-fun ,var ,(let* ([arg-type (init type-body)]
+                                            [unit? (and (null? (car arg-type))
+                                                        (= (length arg-type) 1))])
+                                       (if unit? '()
+                                         arg-type))
+                               ,(last type-body)))
+               `(declare-const ,var ,type))
              `(declare-const ,var ,type))))
        var-types))
 
 (define (state->nonrec-model-finder state)
+  (define (convert-null expr)
+    (cond [(null? expr) '()]
+          [(pair? expr) `(,(if (null? (car expr)) 'nil
+                             (convert-null (car expr))) . ,(convert-null (cdr expr)))]
+          [else expr]))
   (define (convert-boolean-literals expr)
     (cond [(null? expr) '()]
           [(pair? expr) `(,(convert-boolean-literals (car expr)) . ,(convert-boolean-literals (cdr expr)))]
@@ -342,14 +439,17 @@
                             `(- ,(- expr))
                             expr)]
           [else expr]))
-  (let* ([stmts (convert-negative-numbers (convert-boolean-literals (state->stmts state)))]
+  (let* ([stmts (convert-null (convert-negative-numbers (convert-boolean-literals (state->stmts state))))]
          [decls (var-type-map->declarations (hash-table->alist (state->var-type-map state)))]
          [no-recursion-constraint (map (lambda (var)
                                          `(assert (= ,var false)))
                                        (filter (lambda (var)
                                                  (equal? "R" (substring (symbol->string var) 0 1)))
                                                (map car (hash-table->alist (state->var-type-map state)))))]
-         [z3-stmts `(,@decls ,@stmts ,@no-recursion-constraint (check-sat) (get-model))])
+         [header `(
+                   (declare-datatypes (T) ((Lst nil (cons (car T) (cdr Lst)))))
+                   )]
+         [z3-stmts `(,@header ,@decls ,@stmts ,@no-recursion-constraint (check-sat) (get-model))])
     z3-stmts))
 
 (define (check-state state)
@@ -402,5 +502,13 @@
     (loop 0 initial-state))
 
   (search max-depth initial-state))
+
+(define (run-smt program)
+  (define labeled-body (label-transform program))
+  (define labeled-env
+    (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e)) (cdr v-e)
+                                         (label-transform (cdr v-e))))) default-env))
+  (let* ([state (smt-evaluator labeled-body labeled-env '(top))])
+    (list state (check-state state))))
 
 )

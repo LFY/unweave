@@ -36,6 +36,7 @@
    (define (gen-output-file) (string-append "output_" (new-file-id) ".z3"))
    (let ([z3-script-file (gen-z3-file)]
          [z3-output-file (gen-output-file)])
+     (for-each (lambda (x) (display x) (newline)) stmts)
      (system (format "rm -rf ~s" z3-script-file))
      (with-output-to-file z3-script-file
        (lambda () (for-each (lambda (x)
