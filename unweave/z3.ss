@@ -40,9 +40,9 @@
      (system (format "rm -rf ~s" z3-script-file))
      (with-output-to-file z3-script-file
        (lambda () (for-each (lambda (x)
-                         (display x)
-                         (newline))
-                       stmts)))
+                              (display x)
+                              (newline))
+                            stmts)))
      (system (format "z3 -smt2 ~s > ~s"
                      z3-script-file
                      z3-output-file))
@@ -62,8 +62,8 @@
    (define (convert-val v)
      (cond [(and (pair? v) (= (length v) 2))
             (if (equal? '- (car v))
-              (- (cadr v))
-              v)]
+                (- (cadr v))
+                v)]
            [(member v '(true false)) (if (equal? 'true v) #t #f)]
            [else v]))
    (define (decl->var-val-type d)
@@ -72,7 +72,7 @@
             [result-type (cadddr d)]
             [val (convert-val (cadddr (cdr d)))]
             [final-type (if (null? arg-types) result-type
-                          `(,@arg-types ,result-type))])
+                            `(,@arg-types ,result-type))])
        (list var-name val final-type)))
    (map decl->var-val-type assignment-expr))
 

@@ -81,7 +81,7 @@
  ;;                             (let* ([call (cadr v)]
  ;;                                    [proc (caddr v)])
  ;;                               `(,call ,(proc))]
- ;;                             [else `(,(unfold-trace (car v)) . 
+ ;;                             [else `(,(unfold-trace (car v)) .
 
  (define (pv-unfold pv-tree)
    (define (unfold-trace v)
