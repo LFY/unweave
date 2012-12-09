@@ -83,7 +83,9 @@
          rv->val
          assert?
          assert->lab
-         assert->body
+         assert->prog
+         assert->query
+
          explode-assert
          fundep?
          fundep->lab
@@ -307,7 +309,8 @@
    (apply k (cdr x)))
  (define (assert? e) (and (pair? e) (eq? 'assert (car e))))
  (define (assert->lab e) (cadr e))
- (define (assert->body e) (caddr e))
+ (define (assert->prog e) (caddr e))
+ (define (assert->query e) (cadddr e))
 
  ;; Functional dependencies
 

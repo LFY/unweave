@@ -1,9 +1,11 @@
 #!r6rs
 (library (unweave smt-search)
          (export smt-solve
-                 run-smt)
+                 run-smt
+                 smt-mh-query)
 
          (import (rnrs)
+                 (rnrs eval)
                  (only (ikarus) set-car!)
 
                  (only (scheme-tools) pretty-print symbol-maker)
@@ -35,6 +37,7 @@
                  (type-parameter? t))))
 
            ;; Assertions (for SMT solver)
+
            (define stmts '())
            (define continue-thunks '())
            (define deletion-thunks '())
@@ -101,9 +104,8 @@
                                   [(string? val) 'String]
                                   [(symbol? val) 'Symbol]
                                   [else (begin
-                                          (pretty-print `(unknown! ,val))
+                                          ;; (pretty-print `(unknown! ,val))
                                           'UNKNOWN-TYPE)])])
-               (pretty-print `(val->type ,val ,result))
                result))
 
            (define (inst-val-type! var val)
@@ -177,7 +179,7 @@
                (cons `(,var . ,val) env)))
 
            (define (infer-return-type prim var-vals) 
-             (pretty-print `(infer ,prim ,@var-vals))
+             ;; (pretty-print `(infer ,prim ,@var-vals))
              (let* ([types (map (lambda (var-val)
                                   (if (var? var-val)
                                     (get-type var-val)
@@ -191,7 +193,7 @@
                                                               (get-type var-val)
                                                               (val->type var-val))))]
                                                  [rest-var-val (cadr var-vals)])
-                                            (pretty-print `(inst-type! ,rest-var-val ,type))
+                                            ;; (pretty-print `(inst-type! ,rest-var-val ,type))
                                             (inst-type! rest-var-val type)
                                             type)]
                      [(equal? prim 'cdr) (let* ([var-val (car var-vals)])
@@ -206,7 +208,7 @@
                      [(equal? prim 'null?) 'Bool]
                      [(member prim '(> < = <= >=)) 'Bool]
                      [else (begin
-                             (pretty-print `(unknown: (,prim ,@var-vals)))
+                             ;; (pretty-print `(unknown: (,prim ,@var-vals)))
                              'UNKNOWN-TYPE)])))
 
            (define (convert-prim f args)
@@ -235,7 +237,7 @@
                                               (inst-type! Rv (if (contains-type-parameter? (get-type Tv))
                                                                (get-type Ev)
                                                                (get-type Tv)))
-                                              (pretty-print `(inst-type! ,Rv (if ,eval-T? ,(get-type Tv) ,(get-type Ev))))
+                                              ;; (pretty-print `(inst-type! ,Rv (if ,eval-T? ,(get-type Tv) ,(get-type Ev))))
                                               (inst-val! Rv (if eval-T? (get-val Tv) (get-val Ev)))
                                               Rv)
                                             (let* ([Cv (next-control addr)]
@@ -253,12 +255,13 @@
                                                                (get-type Tv)))
                                               Rv)
                                             )))]
-               [(assert? ex) (explode-assert ex (lambda (l b)
+               [(assert? ex) (explode-assert ex (lambda (l p q)
                                                   (let* ([Av (next-assert addr)]
-                                                         [Bv (E b env (cons l addr) lazy? control-env)])
+                                                         [Pv (E p env (cons l addr) lazy? control-env)]
+                                                         [Qv (E `(call ,l ,q ,Pv) env (cons 'q (cons l addr)) lazy? control-env)])
                                                     (inst-type! Av 'Bool)
-                                                    (add-stmt!  `(assert (and (= ,Av ,Bv) (= ,Av #t))))
-                                                    Bv)))]
+                                                    (add-stmt!  `(assert (and (= ,Av ,Qv) (= ,Av #t))))
+                                                    Pv)))]
                [(lambda? ex) (explode-lambda ex (lambda (l vs c) `(closure (lambda ,l ,vs ,c ,@(if (has-type-annotation? ex) (list (lambda->return-type ex)) '())) ,env)))]
                [(factor? ex) (explode-factor ex (lambda (lab formals call) 
                                                   `(factor-closure (lambda ,lab ,(cons 'temp formals)
@@ -275,7 +278,7 @@
                                               (let* ([Vv (next-call (cons l addr))]
                                                      [proc (E f env (cons l addr) lazy? control-env)]
                                                      [vals (map (lambda (v) (E v env (cons l addr) lazy? control-env)) vs)])
-                                                (pretty-print `(call ,Vv ,f ,vals))
+                                                ;; (pretty-print `(call ,Vv ,f ,vals))
                                                 (cond [(or (factor-closure? proc)
                                                            (closure? proc)) 
                                                        (explode-closure proc (lambda (lam env2)
@@ -332,23 +335,25 @@
                                                          (add-stmt! `(assert (= ,Vv ,(convert-prim (ref->var f) vals))))
                                                          (if lazy?
                                                            (begin
-                                                             (pretty-print `(proc-lazy ,Vv ,(ref->var f) ,@vals))
+                                                             ;; (pretty-print `(proc-lazy ,Vv ,(ref->var f) ,@vals))
                                                              ;; type inference is needed here (for primitive functions)
                                                              (inst-type! Vv (infer-return-type (ref->var f) vals))
                                                              Vv)
                                                            (begin
-                                                             (pretty-print `(proc-eager ,Vv ,(ref->var f) ,@vals))
+                                                             ;; (pretty-print `(proc-eager ,Vv ,(ref->var f) ,@vals))
                                                              (inst-type! Vv (infer-return-type (ref->var f) vals))
                                                              (if (all (lambda (x) (not (lazy-var? x)))
                                                                       vals)
                                                                (inst-val-type! Vv (apply proc (map (lambda (v) (if (var? v) (get-val v) v))
                                                                                                    vals))))
                                                              Vv)))]
-                                                      [else (pretty-print `(error-in-call-norm-eval ,proc))]))))]
+                                                      [else 
+                                                        (pretty-print `(error-in-call-norm-eval ,proc))
+                                                        ]))))]
                [(ref? ex) (let* ([lookup-res (lookup env (ref->var ex))])
                             (if (not-found? lookup-res) 
                               (begin
-                                (pretty-print `(not-found: ,lookup-res ,(ref->var ex)))
+                                ;; (pretty-print `(not-found: ,lookup-res ,(ref->var ex)))
                                 (cond [(rv? lookup-res)
                                        (list-ref lookup-res 5)]
                                       [else lookup-res]))
@@ -370,11 +375,18 @@
                [else ex]))
            (let* ([final-var (E ex env addr #f '())])
              (letrec ([refresh-state (lambda () 
-                                       (make-state final-var var-val-map var-type-map lazy-map continue-thunks deletion-thunks stmts refresh-state))])
+                                       (make-state (list final-var (hash-table-ref var-val-map final-var))
+                                                   var-val-map 
+                                                   var-type-map 
+                                                   lazy-map 
+                                                   continue-thunks 
+                                                   deletion-thunks 
+                                                   stmts 
+                                                   refresh-state))])
                (refresh-state))))
 
          (define (make-state 
-                   final-var 
+                   final 
                    var-val-map 
                    var-type-map 
                    lazy-map 
@@ -382,12 +394,14 @@
                    deletion-thunks 
                    stmts
                    refresh-state)
-           `(,final-var ,var-val-map ,var-type-map ,lazy-map ,continue-thunks ,deletion-thunks ,stmts ,refresh-state))
+           `(,final ,var-val-map ,var-type-map ,lazy-map ,continue-thunks ,deletion-thunks ,stmts ,refresh-state))
 
          (define (make-list-ref n)
            (lambda (xs) (list-ref xs n)))
 
-         (define state->final-var (make-list-ref 0))
+         (define state->final (make-list-ref 0))
+         (define (state->final-val state)
+           (hash-table-ref (state->var-val-map state) (car (state->final state))))
          (define state->var-val-map (make-list-ref 1))
          (define state->var-type-map (make-list-ref 2))
          (define state->lazy-map (make-list-ref 3))
@@ -422,7 +436,7 @@
                       `(declare-const ,var ,type))))
                 var-types))
 
-         (define (state->nonrec-model-finder state)
+         (define (state->nonrec-model-finder state extra-stmts)
            (define (convert-null expr)
              (cond [(null? expr) '()]
                    [(pair? expr) `(,(if (null? (car expr)) 'nil
@@ -441,20 +455,19 @@
                                      expr)]
                    [else expr]))
            (let* ([stmts (convert-null (convert-negative-numbers (convert-boolean-literals (state->stmts state))))]
+                  [postprocessed-extra-stmts (convert-null (convert-negative-numbers (convert-boolean-literals extra-stmts)))]
                   [decls (var-type-map->declarations (hash-table->alist (state->var-type-map state)))]
                   [no-recursion-constraint (map (lambda (var)
                                                   `(assert (= ,var false)))
                                                 (filter (lambda (var)
                                                           (equal? "R" (substring (symbol->string var) 0 1)))
                                                         (map car (hash-table->alist (state->var-type-map state)))))]
-                  [header `(
-                            (declare-datatypes (T) ((Lst nil (cons (car T) (cdr Lst)))))
-                            )]
-                  [z3-stmts `(,@header ,@decls ,@stmts ,@no-recursion-constraint (check-sat) (get-model))])
+                  [header `((declare-datatypes (T) ((Lst nil (cons (car T) (cdr Lst))))))]
+                  [z3-stmts `(,@header ,@decls ,@stmts ,@no-recursion-constraint ,@postprocessed-extra-stmts (check-sat) (get-model))])
              z3-stmts))
 
-         (define (check-state state)
-           (let* ([z3-result (run-z3 (state->nonrec-model-finder state))]
+         (define (check-state state extra-stmts)
+           (let* ([z3-result (run-z3 (state->nonrec-model-finder state extra-stmts))]
                   [sat? (equal? 'sat (car z3-result))])
              (if sat?
                (z3-result->assignment (cdr (cadr z3-result)))
@@ -471,7 +484,7 @@
              next-state))
 
          (define (smt-solve max-depth program constraint)
-           (define body `(assert (,constraint ,program)))
+           (define body `(assert ,program ,constraint))
            (define labeled-body (label-transform body))
            (define labeled-env
              (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e)) (cdr v-e)
@@ -481,8 +494,8 @@
 
            (define (search max-depth initial-state)
              ;; Interface to state functions
-             (define (state->smt-result state)
-               (check-state state))
+             (define (state->smt-result state extra-stmts)
+               (check-state state extra-stmts))
              (define (sat? result)
                (not (equal? 'unsat result)))
              (define (fully-expanded? state)
@@ -492,12 +505,31 @@
              (define (expand state)
                (advance-state! state))
 
+             (define (find-further-solutions state sols)
+               (define (ineq-stmt var val)
+                 `(assert (not (= ,var ,val))))
+               (let* ([next-result (state->smt-result state (map (lambda (sol)
+                                                                   (let* ([var (car sol)]
+                                                                          [val (cadr sol)])
+                                                                     (ineq-stmt var val)))
+                                                                 sols))])
+                 (if (sat? next-result)
+                   (let* ([sol (assoc (car (state->final state)) next-result)])
+                     (pretty-print sol)
+                     (cons sol (find-further-solutions state (cons sol sols))))
+                   '())))
+
+
              (define (loop curr-depth state)
                (if (> curr-depth max-depth)
                  'unknown
-                 (let* ([solve-result (state->smt-result state)])
+                 (let* ([solve-result (state->smt-result state '())])
                    (if (sat? solve-result)
-                     solve-result
+                     state
+                     ;; (let* ([next-sol (assoc (car (state->final state)) solve-result)])
+                       ;; (cons next-sol solve-result))
+                       ;; state)
+                     ;; (cons next-sol ;; `(assignment: ;; ,solve-result) (find-further-solutions state (list next-sol))))
                      (loop (+ curr-depth 1)
                            (expand state))))))
              (loop 0 initial-state))
@@ -510,6 +542,179 @@
              (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e)) (cdr v-e)
                                                   (label-transform (cdr v-e))))) default-env))
            (let* ([state (smt-evaluator labeled-body labeled-env '(top))])
-             (list state (check-state state))))
+             (list state (check-state state '()))))
+
+         (define (run-state-with-assignment max-search-depth assignment state)
+
+           ;; step 1. add the asn as constraints to the state.
+           ;; step 2. run the smt solver.
+           ;; step 3. if this is unsat when the recursion variable is true, unroll (call continue thunks), up to max-search-depth, until sat.
+
+           (define assignment-constraint 
+             (map (lambda (var-val-type)
+                    (let* ([var (car var-val-type)]
+                           [val (cadr var-val-type)])
+                      `(assert (= ,var ,val))))
+                  assignment))
+
+           (define (sat? result)
+             (not (equal? 'unsat result)))
+
+           (define (loop curr-depth state)
+             (if (> curr-depth max-search-depth)
+               'unknown
+               (let* ([solve-result (check-state state assignment-constraint)])
+                 (if (sat? solve-result)
+                   (list state solve-result)
+                   (loop (+ curr-depth 1)
+                         (advance-state! state))))))
+
+           (loop 0 state))
+
+         ;; what we want to go on behind the scenes here, is a gradually growing SMT formula that encompasses all possible executions,
+         ;; which acts like a huge fixed-universe model.
+
+         ;; mcmc-state: (State, Assignment, Score)
+         (define (make-mcmc-state state assignment score)
+           (list state assignment score))
+
+         (define (mcmc-state->prog-state state) (car state))
+         (define (mcmc-state->assignment state) (cadr state))
+         ;; scoring placeholder
+         (define (mcmc-state->score state) 0.0)
+
+
+         (define (exists-var? s) (equal? "E" (substring (symbol->string s) 0 1)))
+
+         (define (formula->xrp-domains formula)
+           (define (exists-implication->xrp-domain impl)
+             (let* ([disj (caddr impl)]
+                    [xrp-val-constraints (cdr disj)]
+                    [xrp-var (cadr (car xrp-val-constraints))])
+               (cons xrp-var (map caddr xrp-val-constraints))))
+           (define (exists-implication? assert-stmt)
+             (let* ([body (cadr assert-stmt)])
+               (and (list? body)
+                    (equal? '=> (car body))
+                    (exists-var? (cadr body)))))
+           (define (assert->exists-implication assert)
+             (cadr assert))
+
+           (map exists-implication->xrp-domain
+                (map assert->exists-implication 
+                     (filter exists-implication? formula))))
+
+         ;; Returns new assignment constraint represnting a perturbed variable.
+         ;; Constrains all other currently-existing variables to be the same.
+         (define (perturb-assignment assignment xrp-domains)
+
+           (define (exist-var->xrp-var v)
+             (let* ([var-idx (substring
+                               (symbol->string v)
+                               1 (string-length (symbol->string v)))])
+               (string->symbol
+                 (string-append "X" var-idx))))
+
+           (let* ([existence-variables (filter cadr (filter (lambda (a) (exists-var? (car a))) assignment))]
+                  [existing-xrps (map exist-var->xrp-var (map car existence-variables))]
+                  ;; [void (pretty-print `(existing-xrps ,existing-xrps ,xrp-domains))]
+                  [proposal-var (uniform-select existing-xrps)]
+                  [proposal-val (uniform-select (cdr (assoc proposal-var xrp-domains)))]
+                  ;; [void (pretty-print `(proposal-var-val ,proposal-var ,proposal-val))]
+                  [proposal-type (caddr (assoc proposal-var assignment))]
+                  [assignment (cons `(,proposal-var ,proposal-val ,proposal-type)
+                                    (map (lambda (assignment)
+                                           (let* ([var (car assignment)]
+                                                  [current-val (cadr assignment)]
+                                                  [current-type (caddr assignment)])
+                                             `(,var ,current-val ,current-type)))
+                                         (map (lambda (xrp-var)
+                                                (assoc xrp-var assignment))
+                                              (filter (lambda (xrp-var)
+                                                        (not (equal? proposal-var xrp-var)))
+                                                      existing-xrps))))])
+             assignment))
+
+         ;; Returns new assignment constraint represnting a perturbed variable.
+         ;; May set other variables.
+         (define (block-perturb-assignment assignment xrp-domains)
+
+           (define (exist-var->xrp-var v)
+             (let* ([var-idx (substring
+                               (symbol->string v)
+                               1 (string-length (symbol->string v)))])
+               (string->symbol
+                 (string-append "X" var-idx))))
+
+           (let* ([existence-variables (filter cadr (filter (lambda (a) (exists-var? (car a))) assignment))]
+                  [existing-xrps (map exist-var->xrp-var (map car existence-variables))]
+                  ;; [void (pretty-print `(existing-xrps ,existing-xrps ,xrp-domains))]
+                  [proposal-var (uniform-select existing-xrps)]
+                  [proposal-val (uniform-select (cdr (assoc proposal-var xrp-domains)))]
+                  ;; [void (pretty-print `(proposal-var-val ,proposal-var ,proposal-val))]
+                  [proposal-type (caddr (assoc proposal-var assignment))]
+                  [assignment (list `(,proposal-var ,proposal-val ,proposal-type))])
+             assignment))
+
+         (define (proposal max-search-depth mcmc-state)
+           (let* ([formula (state->stmts (mcmc-state->prog-state mcmc-state))]
+                  [current-assignment (mcmc-state->assignment mcmc-state)]
+                  [domains (formula->xrp-domains formula)]
+                  [new-assignment (block-perturb-assignment current-assignment domains)]
+                  [new-prog-state+consistent-assignment (run-state-with-assignment max-search-depth new-assignment (mcmc-state->prog-state mcmc-state))])
+             (if (equal? 'unknown new-prog-state+consistent-assignment)
+               mcmc-state
+               (let* ([new-prog-state (car new-prog-state+consistent-assignment)]
+                      [final-assignment (cadr new-prog-state+consistent-assignment)])
+                 (make-mcmc-state new-prog-state 
+                                  final-assignment
+                                  (mcmc-state->score mcmc-state))))))
+
+         (define (smt-mh-loop num-iter max-search-depth initial-state)
+           (define samples '())
+
+           (define (accumulate-sample! mcmc-state)
+             (let* ([sample-val (cadr (assoc (car (state->final (mcmc-state->prog-state mcmc-state)))
+                                             (mcmc-state->assignment mcmc-state)))]
+                    [final-sample-val (if (pair? sample-val)
+                                        (eval `(let ()
+                                                 (define nil '())
+                                                 (define answer ,sample-val)
+                                                 answer)
+                                              (environment '(rnrs))))])
+               (pretty-print final-sample-val)
+               (set! samples (cons final-sample-val samples))))
+
+
+           (define (loop iter curr-state)
+             (accumulate-sample! curr-state)
+             (if (< iter num-iter)
+               (let* ([score-before (mcmc-state->score curr-state)]
+                      [next-state (proposal max-search-depth curr-state)]
+                      [score-after (mcmc-state->score next-state)]
+                      [accept? (< (log (random-real)) (- score-after score-before))])
+                 (if accept?
+                   (loop (+ 1 iter) next-state)
+                   (loop (+ 1 iter) curr-state)))
+                 curr-state))
+
+           (loop 0 initial-state)
+           samples)
+
+         (define (smt-mh-query num-samples max-search-depth program constraint)
+           (define body `(assert ,program ,constraint))
+           (define labeled-body (label-transform body))
+           (define labeled-env
+             (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e)) (cdr v-e)
+                                                  (label-transform (cdr v-e))))) default-env))
+
+           (define initial-prog-state (smt-solve max-search-depth program constraint))
+           (define initial-assignment (check-state initial-prog-state '()))
+           (define initial-score 0.0)
+
+           (define initial-mcmc-state (make-mcmc-state initial-prog-state initial-assignment initial-score))
+
+           (smt-mh-loop num-samples max-search-depth initial-mcmc-state))
+
 
          )
