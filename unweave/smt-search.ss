@@ -39,6 +39,7 @@
            ;; Assertions (for SMT solver)
 
            (define stmts '())
+           (define scoring-stmts '())
            (define continue-thunks '())
            (define deletion-thunks '())
 
@@ -49,6 +50,9 @@
            (define var-val-map (make-hash-table equal?))
            (define var-type-map (make-hash-table equal?))
            (define lazy-map (make-hash-table equal?))
+
+           ;; Assigns a function call name (with variable arguments, etc) to each call variable.
+           (define call-name-map (make-hash-table equal?))
 
            (define (addr->var addr prefix)
              (hash-table-ref addr-var-map 
@@ -68,10 +72,15 @@
                                                  (equal? "E" (substring (symbol->string v) 0 1))
                                                  (equal? "A" (substring (symbol->string v) 0 1))
                                                  (equal? "X" (substring (symbol->string v) 0 1))
-                                                 (equal? "Y" (substring (symbol->string v) 0 1)))))
+                                                 (equal? "Y" (substring (symbol->string v) 0 1))
+                                                 (equal? "S" (substring (symbol->string v) 0 1)))))
 
            (define (inst-type! var val)
-             (hash-table-set! var-type-map var val))
+             (if (and (hash-table-exists? var-type-map var)
+                      (not (contains-type-parameter? (hash-table-ref var-type-map var)))
+                      (contains-type-parameter? val))
+               '()
+               (hash-table-set! var-type-map var val)))
 
            (define (inst-val! var val)
              (hash-table-set! var-val-map var val))
@@ -106,6 +115,8 @@
                                   [else (begin
                                           ;; (pretty-print `(unknown! ,val))
                                           'UNKNOWN-TYPE)])])
+
+               ;; (pretty-print `(val->type ,val ,result))
                result))
 
            (define (inst-val-type! var val)
@@ -150,10 +161,14 @@
            (define (next-choice-existence addr) (addr->var addr 'E))
            (define (next-call addr) (addr->var addr 'V))
 
+           (define (next-score addr) (addr->var addr 'S))
+
            (define (next-recursion-flag addr) (addr->var addr 'R))
 
            (define (add-stmt-once! stmt) (if (not (member stmt stmts)) (add-stmt! stmt) '()))
            (define (add-stmt! stmt) (set! stmts (cons stmt stmts)))
+           (define (add-scoring-stmt! stmt) (set! scoring-stmts (cons stmt scoring-stmts)))
+
            (define (lookup cxt label) (let* ([lk (assoc label cxt)]) (if lk (cdr lk) 'not-found)))
 
            (define (rv? v) (and (var? v) (equal? "X" (substring (symbol->string v) 0 1))))
@@ -193,8 +208,10 @@
                                                               (get-type var-val)
                                                               (val->type var-val))))]
                                                  [rest-var-val (cadr var-vals)])
-                                            ;; (pretty-print `(inst-type! ,rest-var-val ,type))
-                                            (inst-type! rest-var-val type)
+                                            (if (var? rest-var-val)
+                                              (begin
+                                                ;; (pretty-print `(inst-type! ,var-vals ,rest-var-val ,type))
+                                                (inst-type! rest-var-val type)))
                                             type)]
                      [(equal? prim 'cdr) (let* ([var-val (car var-vals)])
                                            (if (var? var-val)
@@ -213,7 +230,9 @@
 
            (define (convert-prim f args)
              (if (equal? 'null? f) 
-               `(= nil ,@args)
+               (let* ([arg (car args)]
+                      [type (hash-table-ref var-type-map arg)])
+                 `(= (as nil ,type) ,arg))
                `(,f ,@args)))
 
            (define (E ex env addr lazy? control-env) 
@@ -310,13 +329,28 @@
                                                                                        (inst-type! Rv 'Bool)
                                                                                        (add-stmt! recursion-condition)
                                                                                        (add-stmt! recursion-definition)
+
+
                                                                                        (set! continue-thunks (cons res-thunk continue-thunks))
-                                                                                       (set! deletion-thunks
-                                                                                         (cons
-                                                                                           (lambda ()
-                                                                                             (set-car! (cdr recursion-condition) #t)
-                                                                                             (set-car! (cdr recursion-definition) #t))
-                                                                                           deletion-thunks))
+
+                                                                                       (if (factor-closure? proc)
+                                                                                         (let* ([Sv (next-score (cons l addr))]
+                                                                                                [scoring-def `(assert (=> ,Rv (= ,Sv ,Vv)))])
+                                                                                           (inst-type! Sv 'Real)
+                                                                                           (add-scoring-stmt! scoring-def)
+                                                                                           (set! deletion-thunks
+                                                                                             (cons
+                                                                                               (lambda ()
+                                                                                                 (set-car! (cdr recursion-condition) #t)
+                                                                                                 (set-car! (cdr recursion-definition) #t)
+                                                                                                 (set-car! (cdr scoring-def) #t))
+                                                                                               deletion-thunks)))
+                                                                                         (set! deletion-thunks
+                                                                                           (cons
+                                                                                             (lambda ()
+                                                                                               (set-car! (cdr recursion-condition) #t)
+                                                                                               (set-car! (cdr recursion-definition) #t))
+                                                                                             deletion-thunks)))
                                                                                        '())
 
                                                                                      (if (has-type-annotation? lam)
@@ -361,6 +395,7 @@
                [(xrp? ex) (explode-xrp ex (lambda (lab scorer name prop-fx-name params)
                                             (let* ([Xv (next-choice (cons lab addr))]
                                                    [Ev (next-choice-existence (cons lab addr))]
+                                                   [Sv (next-score (cons lab addr))]
                                                    [param-vals (map (lambda (p) (E p env addr lazy? control-env)) params)]) 
                                               (inst-type! Ev 'Bool)
                                               (add-stmt! `(assert (= ,Ev ,(if (null? control-env) #t
@@ -368,12 +403,15 @@
                                                                                            `(= ,(car var-val) ,(cdr var-val)))
                                                                                          control-env))))))
                                               (add-stmt! `(assert (=> ,Ev (or ,@(map (lambda (v) `(= ,Xv ,v)) param-vals)))))
+                                              (inst-type! Sv 'Real)
+                                              (add-scoring-stmt! `(assert (=> ,Ev (= ,Sv ,(log (/ 1.0 (length param-vals)))))))
                                               ;; just do a uniform selection for now
                                               (inst-val-type! Xv (uniform-select param-vals))
                                               Xv)))]
                [(const? ex) (explode-const ex (lambda (lab c) (if (null? c) '() c)))]
                [else ex]))
            (let* ([final-var (E ex env addr #f '())])
+             (pretty-print `(scoring ,scoring-stmts))
              (letrec ([refresh-state (lambda () 
                                        (make-state (list final-var (hash-table-ref var-val-map final-var))
                                                    var-val-map 
@@ -439,8 +477,31 @@
          (define (state->nonrec-model-finder state extra-stmts)
            (define (convert-null expr)
              (cond [(null? expr) '()]
-                   [(pair? expr) `(,(if (null? (car expr)) 'nil
-                                      (convert-null (car expr))) . ,(convert-null (cdr expr)))]
+                   [(pair? expr) (cond [(and (equal? '= (car expr))
+                                             (or (null? (cadr expr))
+                                                 (null? (caddr expr))))
+                                        (let* ([var (if (null? (cadr expr))
+                                                      (caddr expr)
+                                                      (cadr expr))]
+                                               [type (hash-table-ref (state->var-type-map state) var)])
+                                          `(= ,(if (null? (cadr expr))
+                                                 `(as nil ,type)
+                                                 (cadr expr))
+                                              ,(if (null? (caddr expr))
+                                                 `(as nil ,type)
+                                                 (caddr expr))))]
+                                       [(and (equal? '= (car expr))
+                                             (pair? (caddr expr))
+                                             (equal? 'cons (car (caddr expr)))
+                                             (null? (caddr (caddr expr))))
+                                        (let* ([var (cadr expr)]
+                                               [other-val (cadr (caddr expr))]
+                                               [type (hash-table-ref (state->var-type-map state) var)])
+                                          `(= ,var (cons ,other-val (as nil ,type))))]
+                                       [else `(,(if (null? (car expr)) 
+                                                  'nil 
+                                                  (convert-null (car expr))) . 
+                                                ,(convert-null (cdr expr)))])]
                    [else expr]))
            (define (convert-boolean-literals expr)
              (cond [(null? expr) '()]
@@ -457,6 +518,7 @@
            (let* ([stmts (convert-null (convert-negative-numbers (convert-boolean-literals (state->stmts state))))]
                   [postprocessed-extra-stmts (convert-null (convert-negative-numbers (convert-boolean-literals extra-stmts)))]
                   [decls (var-type-map->declarations (hash-table->alist (state->var-type-map state)))]
+                  ;; [void (pretty-print (hash-table->alist (state->var-type-map state)))]
                   [no-recursion-constraint (map (lambda (var)
                                                   `(assert (= ,var false)))
                                                 (filter (lambda (var)
@@ -679,6 +741,9 @@
                     [final-sample-val (if (pair? sample-val)
                                         (eval `(let ()
                                                  (define nil '())
+                                                 (define Int '())
+                                                 (define (Lst . xs) '())
+                                                 (define (as . xs) (car xs))
                                                  (define answer ,sample-val)
                                                  answer)
                                               (environment '(rnrs))))])
