@@ -86,7 +86,6 @@
              (hash-table-set! var-val-map var val))
 
            (define (val->type val)
-
              (define (proper-list? xs)
                (if (or (null? xs) (pair? xs))
                  (if (null? (cdr xs)) 
@@ -159,11 +158,13 @@
            ;; one can flip through lots of structures simply by assigning different values to the control variables.
 
            (define (next-choice-existence addr) (addr->var addr 'E))
+           (define (next-factor-existence addr) (addr->var addr 'P))
            (define (next-call addr) (addr->var addr 'V))
 
            (define (next-score addr) (addr->var addr 'S))
 
            (define (next-recursion-flag addr) (addr->var addr 'R))
+           (define (next-closure addr) (addr->var addr 'K))
 
            (define (add-stmt-once! stmt) (if (not (member stmt stmts)) (add-stmt! stmt) '()))
            (define (add-stmt! stmt) (set! stmts (cons stmt stmts)))
@@ -173,6 +174,13 @@
 
            (define (rv? v) (and (var? v) (equal? "X" (substring (symbol->string v) 0 1))))
            (define (control-var? v) (and (var? v) (equal? "C" (substring (symbol->string v) 0 1))))
+
+           ;; Converts the current set of control variables into a constraint.
+           (define (control-env->constraint control-env)
+             (if (null? control-env) #t
+               `(and ,@(map (lambda (var-val)
+                              `(= ,(car var-val) ,(cdr var-val)))
+                            control-env))))
 
            (define (get-assignment)
              (filter (lambda (var-val)
@@ -194,7 +202,6 @@
                (cons `(,var . ,val) env)))
 
            (define (infer-return-type prim var-vals) 
-             ;; (pretty-print `(infer ,prim ,@var-vals))
              (let* ([types (map (lambda (var-val)
                                   (if (var? var-val)
                                     (get-type var-val)
@@ -283,8 +290,14 @@
                                                     Pv)))]
                [(lambda? ex) (explode-lambda ex (lambda (l vs c) `(closure (lambda ,l ,vs ,c ,@(if (has-type-annotation? ex) (list (lambda->return-type ex)) '())) ,env)))]
                [(factor? ex) (explode-factor ex (lambda (lab formals call) 
-                                                  `(factor-closure (lambda ,lab ,(cons 'temp formals)
-                                                                     (call ,lab (ref ,lab *) (ref ,lab temp) ,call)) ,env)))]
+                                                  `(factor-closure (lambda ,lab 
+                                                                     ;;,(cons 'temp formals)
+                                                                     ,formals
+                                                                     ,call
+                                                                     ;; (call ,lab (ref ,lab *) (ref ,lab temp) ,call)
+                                                                     ,@(if (has-type-annotation? ex)
+                                                                         (list (lambda->return-type ex))
+                                                                         '())) ,env)))]
                [(letrec? ex) (explode-letrec ex (lambda (l bs call)
                                                   (let* ([local-binding-env
                                                            (fold (lambda (b e)
@@ -297,14 +310,14 @@
                                               (let* ([Vv (next-call (cons l addr))]
                                                      [proc (E f env (cons l addr) lazy? control-env)]
                                                      [vals (map (lambda (v) (E v env (cons l addr) lazy? control-env)) vs)])
-                                                ;; (pretty-print `(call ,Vv ,f ,vals))
                                                 (cond [(or (factor-closure? proc)
                                                            (closure? proc)) 
                                                        (explode-closure proc (lambda (lam env2)
                                                                                (let* ([combined-env (append (if (list? (lambda->formals lam))
                                                                                                               (map cons (lambda->formals lam) 
                                                                                                                    (if (factor-closure? proc)
-                                                                                                                     (append (cons 1.0 (cdr vals))) 
+                                                                                                                     ;;(append (cons 1.0 (cdr vals))) 
+                                                                                                                     vals
                                                                                                                      vals))
                                                                                                               (cons (lambda->formals lam) vals))
                                                                                                             env2 env)])
@@ -318,14 +331,19 @@
                                                                                           [Rv (next-recursion-flag (cons l addr))]
                                                                                           [Fv (new-call-name (cons l addr))])
                                                                                      (let*
-                                                                                       ([recursion-condition 
-                                                                                          `(assert (= ,Rv ,(if (null? control-env) #t
-                                                                                                             `(and ,@(map (lambda (var-val)
-                                                                                                                            `(= ,(car var-val) ,(cdr var-val)))
-                                                                                                                          control-env)))))]
+                                                                                       ([recursion-condition `(assert (= ,Rv ,(control-env->constraint control-env)))]
+                                                                                        [converted-vals (map (lambda (val)
+                                                                                                               (cond [(var? val) val]
+                                                                                                                     [(closure? val) 
+                                                                                                                      (let* ([Kv (next-closure (cons l addr))])
+                                                                                                                        (inst-type! Kv 'Clo)
+                                                                                                                        (inst-val! Kv val)
+                                                                                                                        Kv)]
+                                                                                                                     [else val]))
+                                                                                                             vals)]
                                                                                         [recursion-definition `(assert (=> ,Rv (= ,Vv ,(if (null? vals)
                                                                                                                                          Fv
-                                                                                                                                         `(,Fv ,@vals)))))])
+                                                                                                                                         `(,Fv ,@converted-vals)))))])
                                                                                        (inst-type! Rv 'Bool)
                                                                                        (add-stmt! recursion-condition)
                                                                                        (add-stmt! recursion-definition)
@@ -335,7 +353,8 @@
 
                                                                                        (if (factor-closure? proc)
                                                                                          (let* ([Sv (next-score (cons l addr))]
-                                                                                                [scoring-def `(assert (=> ,Rv (= ,Sv ,Vv)))])
+                                                                                                [scoring-def `(assert (and (=> ,Rv (= ,Sv ,Vv))
+                                                                                                                           (=> (not ,Rv) (= ,Sv 0.0))))])
                                                                                            (inst-type! Sv 'Real)
                                                                                            (add-scoring-stmt! scoring-def)
                                                                                            (set! deletion-thunks
@@ -343,7 +362,8 @@
                                                                                                (lambda ()
                                                                                                  (set-car! (cdr recursion-condition) #t)
                                                                                                  (set-car! (cdr recursion-definition) #t)
-                                                                                                 (set-car! (cdr scoring-def) #t))
+                                                                                                 ;; (set-car! (cdr scoring-def) #t)
+                                                                                                 )
                                                                                                deletion-thunks)))
                                                                                          (set! deletion-thunks
                                                                                            (cons
@@ -361,6 +381,16 @@
                                                                                      Vv)
                                                                                    (let* ([res (E (lambda->call lam) combined-env (cons l addr) lazy? control-env)])
                                                                                      (add-stmt! `(assert (= ,Vv ,res)))
+                                                                                     (if (factor-closure? proc)
+                                                                                       (let* ([Sv (next-score (cons l addr))]
+                                                                                              [Pv (next-factor-existence (cons l addr))]
+                                                                                              [factor-existence `(assert (= ,Pv ,(control-env->constraint control-env)))]
+                                                                                              [factor-def `(assert (and (=> ,Pv (= ,Sv ,Vv))
+                                                                                                                         (=> (not ,Pv) (= ,Sv 0.0))))])
+                                                                                         (inst-type! Pv 'Bool)
+                                                                                         (inst-type! Sv 'Real)
+                                                                                         (add-scoring-stmt! factor-existence)
+                                                                                         (add-scoring-stmt! factor-def)))
                                                                                      (if (all (lambda (x) (not (lazy-var? x))) vals)
                                                                                        (inst-val-type! Vv (if (var? res) (get-val res) res)))
                                                                                      Vv)))))]
@@ -374,7 +404,6 @@
                                                              (inst-type! Vv (infer-return-type (ref->var f) vals))
                                                              Vv)
                                                            (begin
-                                                             ;; (pretty-print `(proc-eager ,Vv ,(ref->var f) ,@vals))
                                                              (inst-type! Vv (infer-return-type (ref->var f) vals))
                                                              (if (all (lambda (x) (not (lazy-var? x)))
                                                                       vals)
@@ -398,13 +427,14 @@
                                                    [Sv (next-score (cons lab addr))]
                                                    [param-vals (map (lambda (p) (E p env addr lazy? control-env)) params)]) 
                                               (inst-type! Ev 'Bool)
-                                              (add-stmt! `(assert (= ,Ev ,(if (null? control-env) #t
-                                                                            `(and ,@(map (lambda (var-val)
-                                                                                           `(= ,(car var-val) ,(cdr var-val)))
-                                                                                         control-env))))))
+
+                                              (add-stmt! `(assert (= ,Ev ,(control-env->constraint control-env))))
                                               (add-stmt! `(assert (=> ,Ev (or ,@(map (lambda (v) `(= ,Xv ,v)) param-vals)))))
                                               (inst-type! Sv 'Real)
-                                              (add-scoring-stmt! `(assert (=> ,Ev (= ,Sv ,(log (/ 1.0 (length param-vals)))))))
+                                              ;; should account for existence...
+                                              (add-scoring-stmt! `(assert (and
+                                                                            (=> ,Ev (= ,Sv ,(log (/ 1.0 (length param-vals))))) 
+                                                                            (=> (not ,Ev) (= ,Sv 0.0)))))
                                               ;; just do a uniform selection for now
                                               (inst-val-type! Xv (uniform-select param-vals))
                                               Xv)))]
@@ -419,7 +449,7 @@
                                                    lazy-map 
                                                    continue-thunks 
                                                    deletion-thunks 
-                                                   stmts 
+                                                   (append stmts scoring-stmts)
                                                    refresh-state))])
                (refresh-state))))
 
@@ -458,18 +488,20 @@
                 var-vals))
 
          (define (var-type-map->declarations var-types)
+           (define (fun-arg/val->closure t)
+             (if (and (pair? t) (equal? '-> (car t))) 'Clo t))
            (map (lambda (var-type)
                   (let* ([var (car var-type)]
                          [type (cdr var-type)])
                     (if (pair? type)
                       (if (equal? '-> (car type))
                         (let* ([type-body (cdr type)])
-                          `(declare-fun ,var ,(let* ([arg-type (init type-body)]
+                          `(declare-fun ,var ,(let* ([arg-type (map fun-arg/val->closure (init type-body))]
                                                      [unit? (and (null? (car arg-type))
                                                                  (= (length arg-type) 1))])
                                                 (if unit? '()
                                                   arg-type))
-                                        ,(last type-body)))
+                                        ,(fun-arg/val->closure (last type-body))))
                         `(declare-const ,var ,type))
                       `(declare-const ,var ,type))))
                 var-types))
@@ -515,7 +547,8 @@
                                      `(- ,(- expr))
                                      expr)]
                    [else expr]))
-           (let* ([stmts (convert-null (convert-negative-numbers (convert-boolean-literals (state->stmts state))))]
+           (let* ([void (for-each pretty-print (state->stmts state))]
+                  [stmts (convert-null (convert-negative-numbers (convert-boolean-literals (state->stmts state))))]
                   [postprocessed-extra-stmts (convert-null (convert-negative-numbers (convert-boolean-literals extra-stmts)))]
                   [decls (var-type-map->declarations (hash-table->alist (state->var-type-map state)))]
                   ;; [void (pretty-print (hash-table->alist (state->var-type-map state)))]
@@ -524,8 +557,10 @@
                                                 (filter (lambda (var)
                                                           (equal? "R" (substring (symbol->string var) 0 1)))
                                                         (map car (hash-table->alist (state->var-type-map state)))))]
-                  [header `((declare-datatypes (T) ((Lst nil (cons (car T) (cdr Lst))))))]
+                  [header `((declare-sort Clo 0) ;; an uninterpreted sort for closure values
+                            (declare-datatypes (T) ((Lst nil (cons (car T) (cdr Lst))))))]
                   [z3-stmts `(,@header ,@decls ,@stmts ,@no-recursion-constraint ,@postprocessed-extra-stmts (check-sat) (get-model))])
+             
              z3-stmts))
 
          (define (check-state state extra-stmts)

@@ -12,6 +12,7 @@
          z3-result->assignment)
 
  (import (rnrs)
+         (rnrs eval)
          (only (scheme-tools) system format)
          (only (ikarus) fork waitpid read-line with-input-from-string))
 
@@ -36,7 +37,7 @@
    (define (gen-output-file) (string-append "output_" (new-file-id) ".z3"))
    (let ([z3-script-file (gen-z3-file)]
          [z3-output-file (gen-output-file)])
-     ;; (for-each (lambda (x) (display x) (newline)) stmts)
+     (for-each (lambda (x) (display x) (newline)) stmts)
      (system (format "rm -rf ~s" z3-script-file))
      (with-output-to-file z3-script-file
        (lambda () (for-each (lambda (x)
@@ -60,10 +61,16 @@
 
  (define (z3-result->assignment assignment-expr)
    (define (convert-val v)
-     (cond [(and (pair? v) (= (length v) 2))
-            (if (equal? '- (car v))
-                (- (cadr v))
-                v)]
+     (cond [(pair? v)
+            (eval `(let ()
+                     (define nil '())
+                     (define Int '())
+                     (define Real '())
+                     (define (Lst . xs) '())
+                     (define (as . xs) (car xs))
+                     (define answer ,v)
+                     answer)
+                  (environment '(rnrs)))]
            [(member v '(true false)) (if (equal? 'true v) #t #f)]
            [else v]))
    (define (decl->var-val-type d)
