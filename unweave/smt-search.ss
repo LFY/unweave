@@ -547,7 +547,8 @@
                                      `(- ,(- expr))
                                      expr)]
                    [else expr]))
-           (let* ([void (for-each pretty-print (state->stmts state))]
+           (let* (
+                  ;;[void (for-each pretty-print (state->stmts state))]
                   [stmts (convert-null (convert-negative-numbers (convert-boolean-literals (state->stmts state))))]
                   [postprocessed-extra-stmts (convert-null (convert-negative-numbers (convert-boolean-literals extra-stmts)))]
                   [decls (var-type-map->declarations (hash-table->alist (state->var-type-map state)))]
@@ -773,15 +774,17 @@
            (define (accumulate-sample! mcmc-state)
              (let* ([sample-val (cadr (assoc (car (state->final (mcmc-state->prog-state mcmc-state)))
                                              (mcmc-state->assignment mcmc-state)))]
-                    [final-sample-val (if (pair? sample-val)
-                                        (eval `(let ()
-                                                 (define nil '())
-                                                 (define Int '())
-                                                 (define (Lst . xs) '())
-                                                 (define (as . xs) (car xs))
-                                                 (define answer ,sample-val)
-                                                 answer)
-                                              (environment '(rnrs))))])
+                    [final-sample-val sample-val])
+                    
+                    ;; (if (pair? sample-val)
+                    ;;                     (eval `(let ()
+                    ;;                              (define nil '())
+                    ;;                              (define Int '())
+                    ;;                              (define (Lst . xs) '())
+                    ;;                              (define (as . xs) (car xs))
+                    ;;                              (define answer ,sample-val)
+                    ;;                              answer)
+                    ;;                           (environment '(rnrs))))])
                (pretty-print final-sample-val)
                (set! samples (cons final-sample-val samples))))
 

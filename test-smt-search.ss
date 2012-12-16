@@ -19,10 +19,13 @@
                                           (sum-rand (- k 1))))
                                   (-> Int (Lst Int)))]
                       )
-               (sum-rand 10))
+               (sum-rand (xrp flip-scorer flip flip-prop 4 5 6)))
             '(letrec ([increasing? (lambda (xs)
                                      (if (null? (cdr xs)) #t
                                        (if (> (car xs) (car (cdr xs))) #f
                                          (increasing? (cdr xs))))
                                      (-> (Lst Int) Bool))])
-               (lambda (xs) (increasing? xs) (-> (Lst Int) Bool)))))
+               (lambda (xs) (and
+                              (= 3 (car (cdr (cdr xs))))
+                              (increasing? xs))
+                 (-> (Lst Int) Bool)))))
