@@ -23,8 +23,24 @@
 
                  (unweave util))
 
+         ;; Predicates for variables
+        
+         (define (first-letter x)
+           (string->symbol (substring (symbol->string x) 0 1)))
+
+         (define (smt-variable? v) (and (symbol? v) 
+                               (member (first-letter v)
+                                       '(C V E A X Y S))))
+
+         (define (control-var? v) (and (smt-variable? v) (equal? 'C (first-letter v))))
+         (define (exists-var? v) (and (smt-variable? v) (equal? 'E (first-letter v))))
+         (define (score-var? v) (and (smt-variable? v) (equal? 'S (first-letter v))))
+
          ;; Our state
          (define (smt-evaluator ex env addr)
+
+           (define (var? x) (smt-variable? x))
+           (define (rv? v) (and (smt-variable? v) (equal? 'X (first-letter v))))
 
            (define (type-parameter? s)
              (member s '(A B C D E F G H I J K L M)))
@@ -67,13 +83,6 @@
                                  (hash-table-set! addr-var-map (list addr prefix) var) 
                                  var))))
 
-           (define (var? v) (and (symbol? v) (or (equal? "C" (substring (symbol->string v) 0 1))
-                                                 (equal? "V" (substring (symbol->string v) 0 1))
-                                                 (equal? "E" (substring (symbol->string v) 0 1))
-                                                 (equal? "A" (substring (symbol->string v) 0 1))
-                                                 (equal? "X" (substring (symbol->string v) 0 1))
-                                                 (equal? "Y" (substring (symbol->string v) 0 1))
-                                                 (equal? "S" (substring (symbol->string v) 0 1)))))
 
            (define (inst-type! var val)
              (if (and (hash-table-exists? var-type-map var)
@@ -172,8 +181,6 @@
 
            (define (lookup cxt label) (let* ([lk (assoc label cxt)]) (if lk (cdr lk) 'not-found)))
 
-           (define (rv? v) (and (var? v) (equal? "X" (substring (symbol->string v) 0 1))))
-           (define (control-var? v) (and (var? v) (equal? "C" (substring (symbol->string v) 0 1))))
 
            ;; Converts the current set of control variables into a constraint.
            (define (control-env->constraint control-env)
@@ -305,6 +312,13 @@
                                                                  env bs)]
                                                          [res (E call local-binding-env addr lazy? control-env)])
                                                     res)))]
+               [(begin? ex) (explode-begin ex (lambda (l calls)
+                                                (letrec ([loop (lambda (next-call calls-left)
+                                                                 (let* ([next-result (E next-call (cons l addr) lazy? control-env)])
+                                                                   (if (null? calls-left)
+                                                                     next-result
+                                                                     (loop (car calls-left) (cdr calls-left)))))])
+                                                  (loop calls))))]
                [(rv? ex) (rv->val ex)]
                [(call? ex) (explode-call ex (lambda (l f vs) 
                                               (let* ([Vv (next-call (cons l addr))]
@@ -678,11 +692,14 @@
 
          (define (mcmc-state->prog-state state) (car state))
          (define (mcmc-state->assignment state) (cadr state))
-         ;; scoring placeholder
-         (define (mcmc-state->score state) 0.0)
 
+         (define (assignment->score assignment)
+           (apply + (map cadr (filter (lambda (x) (score-var? (car x)))
+                                      assignment))))
 
-         (define (exists-var? s) (equal? "E" (substring (symbol->string s) 0 1)))
+         (define (mcmc-state->score state) 
+           (assignment->score (mcmc-state->assignment state)))
+
 
          (define (formula->xrp-domains formula)
            (define (exists-implication->xrp-domain impl)
@@ -749,7 +766,7 @@
                   ;; [void (pretty-print `(existing-xrps ,existing-xrps ,xrp-domains))]
                   [proposal-var (uniform-select existing-xrps)]
                   [proposal-val (uniform-select (cdr (assoc proposal-var xrp-domains)))]
-                  ;; [void (pretty-print `(proposal-var-val ,proposal-var ,proposal-val))]
+                  [void (pretty-print `(proposal-var-val ,proposal-var ,proposal-val))]
                   [proposal-type (caddr (assoc proposal-var assignment))]
                   [assignment (list `(,proposal-var ,proposal-val ,proposal-type))])
              assignment))
@@ -759,14 +776,101 @@
                   [current-assignment (mcmc-state->assignment mcmc-state)]
                   [domains (formula->xrp-domains formula)]
                   [new-assignment (block-perturb-assignment current-assignment domains)]
-                  [new-prog-state+consistent-assignment (run-state-with-assignment max-search-depth new-assignment (mcmc-state->prog-state mcmc-state))])
+                  [new-prog-state+consistent-assignment 
+                    (run-state-with-assignment max-search-depth 
+                                               new-assignment 
+                                               (mcmc-state->prog-state mcmc-state))])
              (if (equal? 'unknown new-prog-state+consistent-assignment)
                mcmc-state
                (let* ([new-prog-state (car new-prog-state+consistent-assignment)]
                       [final-assignment (cadr new-prog-state+consistent-assignment)])
                  (make-mcmc-state new-prog-state 
                                   final-assignment
-                                  (mcmc-state->score mcmc-state))))))
+                                  (assignment->score final-assignment))))))
+
+         ;; TODO: Implement searchtreesample
+         (define (uniform-sample-satisfying-assignment max-search-depth
+                                                       extra-constraints
+                                                       prog-state)
+
+           (define max-assignments 10)
+           (define skip-probability 0.5)
+
+           (define (sat? result)
+             (not (equal? 'unsat result)))
+
+           (define (choice-var? v)
+             (and (smt-variable? v)
+                  (equal? 'X (first-letter v))))
+
+           (define (exist-var? v)
+             (and (smt-variable? v)
+                  (equal? 'E (first-letter v))))
+
+           (define (xrp-var->exist-var v)
+             (let* ([var-idx (substring
+                               (symbol->string v)
+                               1 (string-length (symbol->string v)))])
+               (string->symbol
+                 (string-append "E" var-idx))))
+
+           (define (existing-choices assignment)
+             (filter (lambda (v)
+                       (and (choice-var? (car v))
+                            (cadr (assoc (xrp-var->exist-var (car v)) assignment))))
+                     assignment))
+
+           (define (assignment->disequality-constraint assignment)
+             `(assert (or ,@(map (lambda (var-val-type)
+                                   `(not (= ,(car var-val-type)
+                                            ,(cadr var-val-type))))
+                                 assignment))))
+
+           (define (loop curr-depth state solutions previous-assignments)
+             (if (or (>= (length previous-assignments) max-assignments)
+                     (> curr-depth max-search-depth))
+               (list state solutions)
+               (let* ([solve-result (check-state state (append (map assignment->disequality-constraint previous-assignments)
+                                                               extra-constraints))])
+                 (if (sat? solve-result)
+                   (loop curr-depth 
+                         state 
+                         (if (< (random-real) skip-probability)
+                           solutions
+                           (cons solve-result solutions))
+                         (cons (existing-choices solve-result) previous-assignments))
+                   (loop (+ curr-depth 1)
+                         (advance-state! state)
+                         solutions
+                         previous-assignments)))))
+
+           (let* ([final-state-solutions (loop 0 prog-state '() '())])
+             (list (car final-state-solutions)
+                   (uniform-select (cadr final-state-solutions)))))
+
+
+         (define (slice-proposal max-search-depth mcmc-state)
+
+           (define (slice-constraint mcmc-state threshold)
+             (let* ([score-vars (map car (filter (lambda (a) (score-var? (car a)))
+                                                 (mcmc-state->assignment mcmc-state)))])
+               `(assert (<= ,threshold (+ ,@score-vars)))))
+
+
+           (define (uniform a b)
+             (+ a (* (random-real) (- b a))))
+
+           (let* ([current-score (mcmc-state->score mcmc-state)]
+                  [next-slice-threshold (log (uniform 0 (exp current-score)))]
+                  [next-slice-constraint (slice-constraint mcmc-state next-slice-threshold)]
+                  [next-state+assignment (uniform-sample-satisfying-assignment max-search-depth 
+                                                                         (list next-slice-constraint)
+                                                                         (mcmc-state->prog-state mcmc-state))])
+             (make-mcmc-state (car next-state+assignment)
+                              (cadr next-state+assignment)
+                              (assignment->score (cadr next-state+assignment)))))
+             
+                  
 
          (define (smt-mh-loop num-iter max-search-depth initial-state)
            (define samples '())
@@ -793,7 +897,8 @@
              (accumulate-sample! curr-state)
              (if (< iter num-iter)
                (let* ([score-before (mcmc-state->score curr-state)]
-                      [next-state (proposal max-search-depth curr-state)]
+                      ;; [next-state (proposal max-search-depth curr-state)]
+                      [next-state (slice-proposal max-search-depth curr-state)]
                       [score-after (mcmc-state->score next-state)]
                       [accept? (< (log (random-real)) (- score-after score-before))])
                  (if accept?

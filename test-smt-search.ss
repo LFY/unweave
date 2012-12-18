@@ -5,10 +5,40 @@
         (scheme-tools srfi-compat :1)
         (scheme-tools math)
         (unweave smt-search))
+
 (import (printing)
         (unweave smt-search))
 
-;; block proposals on sorted lists
+;; Slice sampling
+
+;; Open-universe Ising
+(for-each pretty-print
+          (smt-mh-query
+            100
+            20
+            '(letrec ([my-map (lambda (f xs)
+                                (if (null? xs) '()
+                                  (cons (f (car xs))
+                                        (my-map f (cdr xs))))
+                                (-> (-> Int Int) (Lst (Lst Int)) (Lst Real)))]
+                      [sum-rand (lambda (k)
+                                  (if (= k 0) '()
+                                    (cons (xrp flip-scorer flip flip-prop 0 1)
+                                          (sum-rand (- k 1))))
+                                  (-> Int (Lst Int)))]
+                      [consec2  (lambda (xs) 
+                                  (if (null? (cdr xs)) '() 
+                                    (cons (cons (car xs) (cons (car (cdr xs)) '())) 
+                                          (consec2 (cdr xs))))
+                                  (-> (Lst Int) (Lst (Lst Int))))]
+                      [eq (factor (x y) (if (= x y) 0.0 -0.6))]
+                      [xs (sum-rand (xrp flip-scorer flip flip-prop 4 5 6))]
+                      [constr (my-map (lambda (xy) (eq (car xy) (car (cdr xy))) (-> (Lst Int) Real))
+                                      (consec2 xs))])
+               xs)
+            '(lambda (xs) #t (-> (Lst Int) Bool))))
+
+;; Generating sorted lists
 (for-each pretty-print
           (smt-mh-query 
             100
@@ -26,6 +56,7 @@
                                          (increasing? (cdr xs))))
                                      (-> (Lst Int) Bool))])
                (lambda (xs) (and
-                              (= 3 (car (cdr (cdr xs))))
+                              (> (car (cdr (cdr (cdr xs))))
+                                 (car (cdr (cdr xs))))
                               (increasing? xs))
                  (-> (Lst Int) Bool)))))

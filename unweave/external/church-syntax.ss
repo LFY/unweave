@@ -45,6 +45,10 @@
          letrec->bindings
          letrec->body
          explode-letrec
+         begin?
+         begin->lab
+         begin->calls
+         explode-begin
          xrp?
          xrp->lab
          xrp->scorer
@@ -209,6 +213,15 @@
       (letrec->bindings lrc)
       (letrec->body lrc)))
 
+ ;; Begin
+ 
+ (define (begin? term) (and (pair? term) (eq? (car term) 'begin)))
+ (define (begin->lab call) (cadr call))
+ (define (begin->calls call) (cddr call))
+ (define (explode-begin b k)
+   (k (begin->lab b)
+      (begin->calls b)))
+ 
  ;; Random primitives============================================================
  ;; Random primitives============================================================
 
