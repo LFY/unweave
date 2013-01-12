@@ -15,10 +15,11 @@
          (unweave external church-syntax))
 
  (define (my-or a b) (or a b))
+
  (define (my-and . bs)
    (define (loop xs)
      (if (null? xs) #t
-       (and (car xs) (loop (cdr xs)))))
+         (and (car xs) (loop (cdr xs)))))
    (loop bs))
 
  (define default-env
