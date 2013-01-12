@@ -214,14 +214,14 @@
       (letrec->body lrc)))
 
  ;; Begin
- 
+
  (define (begin? term) (and (pair? term) (eq? (car term) 'begin)))
  (define (begin->lab call) (cadr call))
  (define (begin->calls call) (cddr call))
  (define (explode-begin b k)
    (k (begin->lab b)
       (begin->calls b)))
- 
+
  ;; Random primitives============================================================
  ;; Random primitives============================================================
 
@@ -355,7 +355,12 @@
 
  (define (lookup cxt label)
    (let* ([lk (assoc label cxt)])
-     (if lk (cdr lk) 'not-found)))
+     (if lk
+         (cdr lk)
+         (begin
+           (display "not found: ")
+           (display label)
+           'not-found))))
 
  (define (not-found? x) (equal? x 'not-found))
 
