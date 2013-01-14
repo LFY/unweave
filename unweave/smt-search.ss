@@ -567,8 +567,8 @@
          (define (advance-state! state)
            (let* ([deletion-thunks (state->deletion-thunks state)]
                   [continue-thunks (state->continue-thunks state)]
-                  [void ((car deletion-thunks))]
-                  [void ((car continue-thunks))]
+                  [void (when (not (null? deletion-thunks)) ((car deletion-thunks)))]
+                  [void (when (not (null? continue-thunks)) ((car continue-thunks)))]
                   [next-state ((state->refresh state))])
              next-state))
 
