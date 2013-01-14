@@ -39,9 +39,11 @@
          ;; Our state
          (define (smt-evaluator ex env addr)
 
+           ;; Predicates on variables
            (define (var? x) (smt-variable? x))
            (define (rv? v) (and (smt-variable? v) (equal? 'X (first-letter v))))
 
+           ;; Parametric types
            (define (type-parameter? s)
              (member s '(A B C D E F G H I J K L M)))
 
@@ -54,20 +56,20 @@
 
            ;; Assertions (for SMT solver)
 
+           ;; Internal state that is accumulated
            (define stmts '())
            (define scoring-stmts '())
            (define continue-thunks '())
            (define deletion-thunks '())
 
+           ;; For assigning names to variables based on the address
            (define symbol-maker-map (make-hash-table equal?))
-
            (define addr-var-map (make-hash-table equal?))
 
            (define var-val-map (make-hash-table equal?))
            (define var-type-map (make-hash-table equal?))
            (define lazy-map (make-hash-table equal?))
 
-           ;; Assigns a function call name (with variable arguments, etc) to each call variable.
            (define call-name-map (make-hash-table equal?))
 
            (define (addr->var addr prefix)
@@ -83,7 +85,10 @@
                                  (hash-table-set! addr-var-map (list addr prefix) var) 
                                  var))))
 
+           (define (lazy-var? var)
+             (hash-table-exists? lazy-map var))
 
+           ;; Primitives for instantiating variables with values
            (define (inst-type! var val)
              (if (and (hash-table-exists? var-type-map var)
                       (not (contains-type-parameter? (hash-table-ref var-type-map var)))
@@ -94,6 +99,16 @@
            (define (inst-val! var val)
              (hash-table-set! var-val-map var val))
 
+           (define (inst-val-type! var val)
+             (let* ([type (val->type val)])
+               (inst-val! var val)
+               (inst-type! var type)
+               var))
+
+           (define (inst-lazy-val! var val)
+             (hash-table-set! lazy-map var val))
+
+           ;; Deriving the type of a given value
            (define (val->type val)
              (define (proper-list? xs)
                (if (or (null? xs) (pair? xs))
@@ -127,17 +142,6 @@
                ;; (pretty-print `(val->type ,val ,result))
                result))
 
-           (define (inst-val-type! var val)
-             (let* ([type (val->type val)])
-               (inst-val! var val)
-               (inst-type! var type)
-               var))
-
-           (define (inst-lazy-val! var val)
-             (hash-table-set! lazy-map var val))
-
-           (define (lazy-var? var)
-             (hash-table-exists? lazy-map var))
 
            (define (get-val var)
              (if (var? var)
@@ -149,6 +153,7 @@
                (hash-table-ref var-type-map var (lambda () 'unknown))
                (val->type var)))
 
+           ;; For instantiating different types of variables
            (define (new-call-name addr) (addr->var addr 'F))
            (define (next-control addr) (addr->var addr 'C))
            (define (next-ret addr) (addr->var addr 'Y))
@@ -175,12 +180,13 @@
            (define (next-recursion-flag addr) (addr->var addr 'R))
            (define (next-closure addr) (addr->var addr 'K))
 
+           ;; Adding statements to the SMT formula trace
            (define (add-stmt-once! stmt) (if (not (member stmt stmts)) (add-stmt! stmt) '()))
            (define (add-stmt! stmt) (set! stmts (cons stmt stmts)))
            (define (add-scoring-stmt! stmt) (set! scoring-stmts (cons stmt scoring-stmts)))
 
+           ;; Looking up items in an environment
            (define (lookup cxt label) (let* ([lk (assoc label cxt)]) (if lk (cdr lk) 'not-found)))
-
 
            ;; Converts the current set of control variables into a constraint.
            (define (control-env->constraint control-env)
@@ -189,16 +195,11 @@
                               `(= ,(car var-val) ,(cdr var-val)))
                             control-env))))
 
-           (define (get-assignment)
-             (filter (lambda (var-val)
-                       (let* ([var (car var-val)]
-                              [val (cdr var-val)])
-                         (rv? var)))
-                     (hash-table->alist var-val-map)))
-
+           ;; Converts the address to a function name
            (define (addr->func-name addr)
              (string->symbol (apply string-append (map symbol->string addr))))
 
+           ;; Replaces the entry indexed by var by val in env, or creates it if none exists
            (define (env-update var val env)
              (if (assoc var env)
                (map (lambda (var-val)
@@ -208,6 +209,8 @@
                     env)
                (cons `(,var . ,val) env)))
 
+           ;; Fills in the return type for a function call f(x1, ... xn)
+           ;; Uses specialized inference rules.
            (define (infer-return-type prim var-vals) 
              (let* ([types (map (lambda (var-val)
                                   (if (var? var-val)
@@ -242,6 +245,7 @@
                              ;; (pretty-print `(unknown: (,prim ,@var-vals)))
                              'UNKNOWN-TYPE)])))
 
+           ;; Converts primitives in Scheme to their SMT counterparts.
            (define (convert-prim f args)
              (if (equal? 'null? f) 
                (let* ([arg (car args)]
@@ -249,45 +253,34 @@
                  `(= (as nil ,type) ,arg))
                `(,f ,@args)))
 
+           ;; Evaluator: Like a Scheme interpreter, but contains parameters for whether it is lazy (to enable incremental execution), and tracks the control-environment, which is the current set of control flow choices.
+           
            (define (E ex env addr lazy? control-env) 
              (cond
                ;; Associate a SMT variable with every address.
                ;; FIXME: Account for evaluating if-statements in lazy mode
                ;; if we're lazy, we'd like to still record if-statements, but not actually use the real value of the control variable.
                [(if? ex) (explode-if ex (lambda (l c t e) 
-                                          (if (not lazy?)
-                                            (let* ([Cv (next-control addr)]
-                                                   ;; invariant: once we've retrieved the variable from calling E on something, we also have access to the actual sampled value.
-                                                   [Vv (E c env addr lazy? control-env)]
-                                                   ;; record the value of the control variable.
-                                                   [void (inst-val-type! Cv (get-val Vv))]
-                                                   [eval-T? (get-val Vv)]
-                                                   [Rv (next-ret addr)]
-                                                   [Tv (E t env (cons l addr) (not eval-T?) (env-update Cv #t control-env))]
-                                                   [Ev (E e env (cons l addr) eval-T? (env-update Cv #f control-env))])
-                                              (add-stmt! `(assert (and (= ,Cv ,Vv) (=> ,Cv (= ,Rv ,Tv)) ;; constraint representing then-branch
-                                                                       (=> (not ,Cv) (= ,Rv ,Ev))))) ;; else-branch
-                                              (inst-type! Rv (if (contains-type-parameter? (get-type Tv))
-                                                               (get-type Ev)
-                                                               (get-type Tv)))
-                                              ;; (pretty-print `(inst-type! ,Rv (if ,eval-T? ,(get-type Tv) ,(get-type Ev))))
-                                              (inst-val! Rv (if eval-T? (get-val Tv) (get-val Ev)))
-                                              Rv)
-                                            (let* ([Cv (next-control addr)]
-                                                   ;; invariant: once we've retrieved the variable from calling E on something, we also have access to the actual sampled value.
-                                                   [Vv (E c env addr lazy? control-env)]
-                                                   ;; record the value of the control variable.
-                                                   [void (inst-type! Cv 'Bool)]
-                                                   [Rv (next-ret addr)]
-                                                   [Tv (E t env (cons l addr) #t (env-update Cv #t control-env))]
-                                                   [Ev (E e env (cons l addr) #t (env-update Cv #f control-env))])
-                                              (add-stmt! `(assert (and (= ,Cv ,Vv) (=> ,Cv (= ,Rv ,Tv)) ;; constraint representing then-branch
-                                                                       (=> (not ,Cv) (= ,Rv ,Ev))))) ;; else-branch
-                                              (inst-type! Rv (if (contains-type-parameter? (get-type Tv))
-                                                               (get-type Ev)
-                                                               (get-type Tv)))
-                                              Rv)
-                                            )))]
+                                          (let* ([Cv (next-control addr)]
+                                                 [Vv (E c env addr lazy? control-env)]
+                                                 [void (if lazy?
+                                                         (inst-type! Cv 'Bool)
+                                                         (inst-val-type! Cv (get-val Vv)))]
+                                                 [eval-T-lazily? (if lazy? #t (not (get-val Vv)))]
+                                                 [eval-E-lazily? (if lazy? #t (get-val Vv))]
+                                                 [Rv (next-ret addr)]
+                                                 [Tv (E t env (cons l addr) eval-T-lazily? (env-update Cv #t control-env))]
+                                                 [Ev (E e env (cons l addr) eval-E-lazily? (env-update Cv #f control-env))])
+                                            (add-stmt! `(assert (and (= ,Cv ,Vv) (=> ,Cv (= ,Rv ,Tv)) ;; constraint representing then-branch
+                                                                     (=> (not ,Cv) (= ,Rv ,Ev))))) ;; else-branch
+                                            ;; Attempt to get the most grounded type.
+                                            (inst-type! Rv (if (contains-type-parameter? (get-type Tv))
+                                                             (get-type Ev)
+                                                             (get-type Tv)))
+
+                                            (if (not lazy?)
+                                              (inst-val! Rv (if eval-T-lazily? (get-val Ev) (get-val Tv))))
+                                            Rv)))]
                [(assert? ex) (explode-assert ex (lambda (l p q)
                                                   (let* ([Av (next-assert addr)]
                                                          [Pv (E p env (cons l addr) lazy? control-env)]
@@ -295,13 +288,15 @@
                                                     (inst-type! Av 'Bool)
                                                     (add-stmt!  `(assert (and (= ,Av ,Qv) (= ,Av #t))))
                                                     Pv)))]
-               [(lambda? ex) (explode-lambda ex (lambda (l vs c) `(closure (lambda ,l ,vs ,c ,@(if (has-type-annotation? ex) (list (lambda->return-type ex)) '())) ,env)))]
+               [(lambda? ex) (explode-lambda ex (lambda (l vs c) 
+                                                  `(closure (lambda ,l ,vs ,c 
+                                                              ,@(if (has-type-annotation? ex) 
+                                                                  (list (lambda->return-type ex)) 
+                                                                  '())) ,env)))]
                [(factor? ex) (explode-factor ex (lambda (lab formals call) 
                                                   `(factor-closure (lambda ,lab 
-                                                                     ;;,(cons 'temp formals)
                                                                      ,formals
                                                                      ,call
-                                                                     ;; (call ,lab (ref ,lab *) (ref ,lab temp) ,call)
                                                                      ,@(if (has-type-annotation? ex)
                                                                          (list (lambda->return-type ex))
                                                                          '())) ,env)))]
@@ -328,11 +323,9 @@
                                                            (closure? proc)) 
                                                        (explode-closure proc (lambda (lam env2)
                                                                                (let* ([combined-env (append (if (list? (lambda->formals lam))
-                                                                                                              (map cons (lambda->formals lam) 
-                                                                                                                   (if (factor-closure? proc)
-                                                                                                                     ;;(append (cons 1.0 (cdr vals))) 
-                                                                                                                     vals
-                                                                                                                     vals))
+                                                                                                              (map cons 
+                                                                                                                   (lambda->formals lam) 
+                                                                                                                   vals)
                                                                                                               (cons (lambda->formals lam) vals))
                                                                                                             env2 env)])
                                                                                  (if lazy?
@@ -341,57 +334,48 @@
                                                                                                        (let* ([next-res (E (lambda->call lam) combined-env (cons l addr) #t control-env)])
                                                                                                          (add-stmt! `(assert (= ,Vv ,next-res)))
                                                                                                          next-res))]
-                                                                                          [void (set! continue-thunks (cons res-thunk continue-thunks))]
                                                                                           [Rv (next-recursion-flag (cons l addr))]
-                                                                                          [Fv (new-call-name (cons l addr))])
-                                                                                     (let*
-                                                                                       ([recursion-condition `(assert (= ,Rv ,(control-env->constraint control-env)))]
-                                                                                        [converted-vals (map (lambda (val)
-                                                                                                               (cond [(var? val) val]
-                                                                                                                     [(closure? val) 
-                                                                                                                      (let* ([Kv (next-closure (cons l addr))])
-                                                                                                                        (inst-type! Kv 'Clo)
-                                                                                                                        (inst-val! Kv val)
-                                                                                                                        Kv)]
-                                                                                                                     [else val]))
-                                                                                                             vals)]
-                                                                                        [recursion-definition `(assert (=> ,Rv (= ,Vv ,(if (null? vals)
-                                                                                                                                         Fv
-                                                                                                                                         `(,Fv ,@converted-vals)))))])
-                                                                                       (inst-type! Rv 'Bool)
-                                                                                       (add-stmt! recursion-condition)
-                                                                                       (add-stmt! recursion-definition)
+                                                                                          [Fv (new-call-name (cons l addr))]
+                                                                                          [recursion-condition `(assert (= ,Rv ,(control-env->constraint control-env)))]  
 
+                                                                                          [converted-vals (map (lambda (val)
+                                                                                                                 (cond [(var? val) val]
+                                                                                                                       [(closure? val) 
+                                                                                                                        (let* ([Kv (next-closure (cons l addr))])
+                                                                                                                          (inst-type! Kv 'Clo)
+                                                                                                                          (inst-val! Kv val)
+                                                                                                                          Kv)]
+                                                                                                                       [else val]))
+                                                                                                               vals)]
+                                                                                          [recursion-definition `(assert (=> ,Rv (= ,Vv ,(if (null? vals) Fv `(,Fv ,@converted-vals)))))])
 
-                                                                                       (set! continue-thunks (cons res-thunk continue-thunks))
+                                                                                     (inst-type! Rv 'Bool)
+                                                                                     (add-stmt! recursion-condition)
+                                                                                     (add-stmt! recursion-definition)
 
-                                                                                       (if (factor-closure? proc)
-                                                                                         (let* ([Sv (next-score (cons l addr))]
-                                                                                                [scoring-def `(assert (and (=> ,Rv (= ,Sv ,Vv))
-                                                                                                                           (=> (not ,Rv) (= ,Sv 0.0))))])
-                                                                                           (inst-type! Sv 'Real)
-                                                                                           (add-scoring-stmt! scoring-def)
-                                                                                           (set! deletion-thunks
-                                                                                             (cons
-                                                                                               (lambda ()
-                                                                                                 (set-car! (cdr recursion-condition) #t)
-                                                                                                 (set-car! (cdr recursion-definition) #t)
-                                                                                                 ;; (set-car! (cdr scoring-def) #t)
-                                                                                                 )
-                                                                                               deletion-thunks)))
-                                                                                         (set! deletion-thunks
-                                                                                           (cons
-                                                                                             (lambda ()
-                                                                                               (set-car! (cdr recursion-condition) #t)
-                                                                                               (set-car! (cdr recursion-definition) #t))
-                                                                                             deletion-thunks)))
-                                                                                       '())
+                                                                                     (set! continue-thunks (cons res-thunk continue-thunks))
+                                                                                     (set! deletion-thunks
+                                                                                       (cons
+                                                                                         (lambda ()
+                                                                                           (set-car! (cdr recursion-condition) #t)
+                                                                                           (set-car! (cdr recursion-definition) #t))
+                                                                                         deletion-thunks))
+
+                                                                                     (if (factor-closure? proc)
+                                                                                       (let* ([Sv (next-score (cons l addr))]
+                                                                                              [scoring-def `(assert (and (=> ,Rv (= ,Sv ,Vv))
+                                                                                                                         (=> (not ,Rv) (= ,Sv 0.0))))])
+                                                                                         (inst-type! Sv 'Real)
+                                                                                         (add-scoring-stmt! scoring-def)
+                                                                                         ))
 
                                                                                      (if (has-type-annotation? lam)
                                                                                        (let* ([type (lambda->return-type lam)])
                                                                                          (inst-type! Vv (last type))
                                                                                          (inst-type! Fv type)))
+
                                                                                      (inst-lazy-val! Vv `(,(addr->func-name (list (lambda->lab lam))) ,@vals))
+
                                                                                      Vv)
                                                                                    (let* ([res (E (lambda->call lam) combined-env (cons l addr) lazy? control-env)])
                                                                                      (add-stmt! `(assert (= ,Vv ,res)))
@@ -400,7 +384,7 @@
                                                                                               [Pv (next-factor-existence (cons l addr))]
                                                                                               [factor-existence `(assert (= ,Pv ,(control-env->constraint control-env)))]
                                                                                               [factor-def `(assert (and (=> ,Pv (= ,Sv ,Vv))
-                                                                                                                         (=> (not ,Pv) (= ,Sv 0.0))))])
+                                                                                                                        (=> (not ,Pv) (= ,Sv 0.0))))])
                                                                                          (inst-type! Pv 'Bool)
                                                                                          (inst-type! Sv 'Real)
                                                                                          (add-scoring-stmt! factor-existence)
@@ -411,29 +395,22 @@
                                                       [(procedure? proc) 
                                                        (begin
                                                          (add-stmt! `(assert (= ,Vv ,(convert-prim (ref->var f) vals))))
+                                                         (inst-type! Vv (infer-return-type (ref->var f) vals))
                                                          (if lazy?
+                                                           Vv
                                                            (begin
-                                                             ;; (pretty-print `(proc-lazy ,Vv ,(ref->var f) ,@vals))
-                                                             ;; type inference is needed here (for primitive functions)
-                                                             (inst-type! Vv (infer-return-type (ref->var f) vals))
-                                                             Vv)
-                                                           (begin
-                                                             (inst-type! Vv (infer-return-type (ref->var f) vals))
                                                              (if (all (lambda (x) (not (lazy-var? x)))
                                                                       vals)
                                                                (inst-val-type! Vv (apply proc (map (lambda (v) (if (var? v) (get-val v) v))
                                                                                                    vals))))
                                                              Vv)))]
                                                       [else 
-                                                        (pretty-print `(error-in-call-norm-eval ,proc))
-                                                        ]))))]
+                                                        (pretty-print `(error-in-call-norm-eval ,proc)) ]))))]
                [(ref? ex) (let* ([lookup-res (lookup env (ref->var ex))])
                             (if (not-found? lookup-res) 
-                              (begin
-                                ;; (pretty-print `(not-found: ,lookup-res ,(ref->var ex)))
-                                (cond [(rv? lookup-res)
-                                       (list-ref lookup-res 5)]
-                                      [else lookup-res]))
+                              (cond [(rv? lookup-res)
+                                     (list-ref lookup-res 5)]
+                                    [else lookup-res])
                               lookup-res))]
                [(xrp? ex) (explode-xrp ex (lambda (lab scorer name prop-fx-name params)
                                             (let* ([Xv (next-choice (cons lab addr))]
@@ -455,7 +432,7 @@
                [(const? ex) (explode-const ex (lambda (lab c) (if (null? c) '() c)))]
                [else ex]))
            (let* ([final-var (E ex env addr #f '())])
-             (pretty-print `(scoring ,scoring-stmts))
+             ;; (pretty-print `(scoring ,scoring-stmts))
              (letrec ([refresh-state (lambda () 
                                        (make-state (list final-var (hash-table-ref var-val-map final-var))
                                                    var-val-map 
@@ -766,7 +743,7 @@
                   ;; [void (pretty-print `(existing-xrps ,existing-xrps ,xrp-domains))]
                   [proposal-var (uniform-select existing-xrps)]
                   [proposal-val (uniform-select (cdr (assoc proposal-var xrp-domains)))]
-                  [void (pretty-print `(proposal-var-val ,proposal-var ,proposal-val))]
+                  ;; [void (pretty-print `(proposal-var-val ,proposal-var ,proposal-val))]
                   [proposal-type (caddr (assoc proposal-var assignment))]
                   [assignment (list `(,proposal-var ,proposal-val ,proposal-type))])
              assignment))
