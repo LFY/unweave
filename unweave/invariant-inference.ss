@@ -1,9 +1,8 @@
 #!r6rs
 (library (unweave invariant-inference)
          (export expr-search
-                 find-subtype-constraints
-                 infer-invariants)
-
+                 infer-invariants
+                 anf)
          (import (rnrs)
                  (rnrs eval)
                  (only (ikarus) set-car!)
@@ -25,6 +24,66 @@
                  (unweave util)
                  
                  (unweave type-inference))
+
+         (define (anf expr)
+           (define lab-ctr 0)
+           (define (next-lab!)
+             (let* ([v (string->symbol (string-append "l" (number->string var-ctr)))])
+               (set! var-ctr (+ 1 var-ctr))
+               v))
+
+           (define var-ctr 0)
+           (define (next-var!)
+             (let* ([v (string->symbol (string-append "x" (number->string var-ctr)))])
+               (set! var-ctr (+ 1 var-ctr))
+               v))
+           (define (A e)
+             (cond [(lambda? e) (explode-lambda e (lambda (l vs call)
+                                                    `(lambda ,l ,vs ,(A call))))]
+                   [(if? e) (explode-if e (lambda (l c t e)
+                                            (let* ([cv (next-var!)])
+                                              `(letrec ,(next-lab!)
+                                                 ([,cv ,(A c)])
+                                                 (if ,(next-lab!) (ref ,(next-lab!) ,cv)
+                                                   ,(A t)
+                                                   ,(A e))))))]
+                   [(call? e) (explode-call e (lambda (l f as)
+                                                (if (null? as) e
+                                                  (let* ([new-f-var (if (ref? f) '() (next-var!))]
+                                                         [new-vars (map (lambda (x) 
+                                                                          (if (or (ref? x)
+                                                                                  (const? x))
+                                                                            '()
+                                                                            (next-var!))) 
+                                                                        as)])
+                                                    `(letrec ,(next-lab!)
+                                                       ,(append (if (null? new-f-var) '() (list (list new-f-var (A f))))
+                                                                (filter (lambda (x) (not (null? x)))
+                                                                        (map (lambda (v x) (if (null? v)
+                                                                                             '() (list v (A x)))) new-vars as)))
+                                                       (call ,(next-lab!)
+                                                             ,(if (null? new-f-var) f
+                                                                `(ref ,(next-lab!)
+                                                                      ,new-f-var))
+                                                             ,@(map (lambda (v a)
+                                                                      (if (null? v) a
+                                                                        `(ref ,(next-lab!) ,v)))
+                                                                    new-vars as)))))))]
+                   [(letrec? e) (explode-letrec e (lambda (l bs c)
+                                                    `(letrec ,(next-lab!)
+                                                       ,(map (lambda (b)
+                                                               `(,(car b) ,(A (cadr b))))
+                                                             bs)
+                                                       ,(A c))))]
+                   [else e]))
+
+           (let* ([answer (A expr)])
+             answer))
+
+         (define (unwrap-template t)
+           (cond [(and (pair? t) (equal? ': (car t)))
+                  (unwrap-template (caddr t))]
+                 [else t]))
 
          (define (expr-search lab e)
            (define (found? l)
@@ -66,44 +125,6 @@
                                                       #f)))]
                      [else #f]))
              (reset (S e)))
-
-         (define (find-subtype-constraints expr)
-           (define subtype-constraints '())
-
-           (define (add-subtype-constraint! l1 l2)
-             (set! subtype-constraints (cons `(<: ,l1 ,l2)
-                                             subtype-constraints)))
-
-           (define (label-of ex)
-             (cadr ex))
-
-           (define (S e)
-             (cond [(if? e) (explode-if e (lambda (l c t e)
-                                            (add-subtype-constraint! (label-of t) l)
-                                            (add-subtype-constraint! (label-of e) l)
-                                            (S c)
-                                            (S t)
-                                            (S e)))]
-                   [(lambda? e) (explode-lambda e (lambda (l vs c)
-                                                    (S c)))]
-                   [(letrec? e) (explode-letrec e (lambda (l bs c)
-                                                    (for-each (lambda (binding)
-                                                                (S (cadr binding)))
-                                                              bs)
-                                                    (add-subtype-constraint! (label-of c) l)
-                                                    (S c)))]
-                   [(call? e) (explode-call e (lambda (l f as)
-                                                (S f)
-                                                (for-each (lambda (arg)
-                                                            (S arg))
-                                                          as)
-                                                ))]
-                   [(ref? e) '()]
-                   [(const? e) '()]
-                   [else 'err]))
-
-           (begin (S expr)
-                  subtype-constraints))
 
          ;; Searches for invariants over EXPR given the types stored in LABEL-TYPE-MAP
          ;; associating points in the program with Hindley-Milner types.
@@ -171,14 +192,17 @@
            (define (env-constr env template)
              `(=> ,env ,template))
 
+           ;; TODO:
+           ;; 0. A-normal-form conversion
+           ;; 1. How to associate program variables in the type?
+           ;; (-> (: K1 T4 x) ...) ?
+
            (define (I e env)
              (cond [(if? e) (explode-if e (lambda (l c t e)
                                             (let* ([template (get-template! l)]
                                                    [c-constr (I c env)]
                                                    [t-constr (I t env)]
                                                    [e-constr (I e env)])
-                                              (add-subtype-constraint! (label-of t) l)
-                                              (add-subtype-constraint! (label-of e) l)
                                               (cons template (append (ret->constr c-constr)
                                                                      (ret->constr t-constr)
                                                                      (ret->constr e-constr)
@@ -225,7 +249,6 @@
                                                                        (ext (car next-binding) (ret->template next) curr-env)))
                                                                    env
                                                                    bs)]
-                                                           [void (add-subtype-constraint! (label-of c) l)]
                                                            [c-constr (I c local-binding-env)]
                                                            [c-template (ret->template c-constr)]
                                                            [c-constraints (ret->constr c-constr)])
@@ -237,17 +260,18 @@
                                                        [f-constr (I f env)]
                                                        [args-constrs (map (lambda (a) (I a env)) as)])
 
-                                                  (cons `(sub-multi ,f ,as vars-of-f ,template)
+                                                  (cons `(sub ,f ,as ,template)
                                                         (append (ret->constr f-constr)
                                                                 (apply append (map cdr args-constrs))
                                                                 )))))]
                    [(ref? e) (let* ([template (get-template! (ref->lab e))])
-                               (cons (lkup (ref->var e) env) '()))]
+                               (if (primitive-type? (unwrap-template template))
+                                 (cons `(== V ,(ref->var e)) '())
+                                 (cons (lkup (ref->var e) env) '())))]
                    [(const? e) (let* ([template (get-template! (cadr e))])
                                  (cons template '()))]
                    [else 'err]))
-           (let* ([void (I expr env)])
-             `((subtype-constraints ,subtype-constraints)
-               (templates ,templates)
-               (final ,void))))
+           (let* ([template+constraints (I expr env)])
+             `((templates ,templates)
+               (final ,template+constraints))))
          )

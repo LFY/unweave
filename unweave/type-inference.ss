@@ -417,7 +417,7 @@
                                                                                            (tenv-ext e (car b) new-type))))])
                                                     (dpp `(adding-binding ,(car b)))
                                                     (dpp `(generalized: ,b-type))
-                                                    (tenv-ext env (car b) b-type)))
+                                                    (tenv-ext e (car b) b-type)))
                                                 env bs)]
                                         [void (dpp 'letrec-after-bindings)]
                                         [void (dpp local-binding-env)]

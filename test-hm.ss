@@ -5,22 +5,14 @@
 
 
 
-(define expr (label-transform
+(define expr (anf (label-transform
                    `(letrec ([geometric (lambda ()
                                           (if (flip)
                                             0
                                             (+ 1 (geometric))))])
-                      (geometric))))
-                      ;; (letrec ([termid (lambda (x) x)])
-                      ;;   (map (lambda (x) (+ x 1))
-                      ;;        (cons 1 (cons 2 '())))))))
+                      (geometric)))))
 
-                      ;; (lambda (f)
-                      ;;   (lambda (y)
-                      ;;     (+ (car (map (lambda (x) (+ x 1))
-                      ;;                  (cons 1 (cons 2 '()))))
-                      ;;        ((termid f) (+ (termid y) 1))))))))
-
+(pretty-print expr)
 
 (define types (infer-types expr `((+ . (-> Int (-> Int Int)))
                                       (cons . (-> a (-> (Lst a) (Lst a))))
@@ -31,17 +23,8 @@
 
 (define label-type-map (cadr types))
 
-(pretty-print expr)
 
-(pretty-print (infer-invariants expr label-type-map '()))
+(pretty-print (infer-invariants expr label-type-map '((flip . (-> () (rf (V Bool) (or (= true V)
+                                                                                      (= false V))))))))
 
-;; 
-;; (define termid '(lambda (x) x))
 
-;; (define expr (label-transform
-;;                    `(lambda (f)
-;;                       (lambda (y)
-;;                         ((,termid f) (+ (,termid y) 1))))))
-
-;; (pretty-print expr)
-;; (pretty-print (infer-types expr `((+ . (-> Int (-> Int Int))))))
