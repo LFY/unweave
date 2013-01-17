@@ -5,7 +5,25 @@
 
 #!r6rs
 (library (unweave type-inference)
-         (export infer-types)
+         (export infer-types
+                 
+                 type?
+                 primitive-type?
+                 type-variable?
+
+                 arrow-type?
+                 arrow-type-arg
+                 arrow-type-res
+
+                 parametric-type?
+                 parametric-type-constructor
+                 parametric-type-parameters
+
+                 make-type-scheme
+                 type-scheme?
+                 type-scheme-vars
+                 type-scheme-body)
+
 
          (import (rnrs)
                  (rnrs eval)

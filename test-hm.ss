@@ -22,16 +22,18 @@
                       ;;        ((termid f) (+ (termid y) 1))))))))
 
 
-(pretty-print labeled2)
+(define types (infer-types labeled2 `((+ . (-> Int (-> Int Int)))
+                                      (cons . (-> a (-> (Lst a) (Lst a))))
+                                      (car . (-> (Lst a) a))
+                                      (cdr . (-> (Lst a) (Lst a)))
+                                      (null? . (-> (Lst a) Bool))
+                                      (flip . (-> () Bool)))))
 
-(pretty-print (expr-search 'a2 labeled2))
-(pretty-print (find-subtype-constraints labeled2))
-;; (pretty-print (infer-types labeled2 `((+ . (-> Int (-> Int Int)))
-;;                                       (cons . (-> a (-> (Lst a) (Lst a))))
-;;                                       (car . (-> (Lst a) a))
-;;                                       (cdr . (-> (Lst a) (Lst a)))
-;;                                       (null? . (-> (Lst a) Bool))
-;;                                       (flip . (-> () Bool)))))
+(define label-type-map (cadr types))
+
+
+(pretty-print (infer-invariants labeled2 label-type-map))
+
 ;; 
 ;; (define termid '(lambda (x) x))
 

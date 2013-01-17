@@ -1,7 +1,8 @@
 #!r6rs
 (library (unweave invariant-inference)
          (export expr-search
-                 find-subtype-constraints)
+                 find-subtype-constraints
+                 infer-invariants)
 
          (import (rnrs)
                  (rnrs eval)
@@ -104,6 +105,74 @@
            (begin (S expr)
                   subtype-constraints))
 
+         ;; Searches for invariants over EXPR given the types stored in LABEL-TYPE-MAP
+         ;; associating points in the program with Hindley-Milner types.
+         ;; Uses the framework of Liquid Types (http://goto.ucsd.edu/~rjhala/liquid/haskell/blog/about/)
          (define (infer-invariants expr label-type-map)
-           '())
+
+           (define subtype-constraints '())
+           (define templates '())
+
+           (define (add-subtype-constraint! l1 l2)
+             (set! subtype-constraints (cons `(<: ,l1 ,l2)
+                                             subtype-constraints)))
+
+           (define (label-of ex)
+             (cadr ex))
+
+           (define lq-tvar-ctr 0)
+           (define (next-lqtv!)
+             (let* ([v (string->symbol (string-append "K" (number->string lq-tvar-ctr)))])
+               (set! lq-tvar-ctr (+ 1 lq-tvar-ctr))
+               v))
+
+           (define (type->fresh-template! t)
+             (cond [(primitive-type? t) `(: ,(next-lqtv!) ,t)]
+                   [(arrow-type? t) `(-> ,(type->fresh-template! (arrow-type-arg t))
+                                         ,(type->fresh-template! (arrow-type-res t)))]
+                   [(parametric-type? t) `((: ,(next-lqtv!) ,(car t))
+                                           ,@(map type->fresh-template! (cdr t)))]
+                   [(type-variable? t) t] ;; preserve polymorphism
+                   [else t]))
+
+           (define (lab->fresh-template! lab)
+             (let* ([hm-type (cdr (assoc lab label-type-map))])
+               (type->fresh-template! hm-type)))
+
+           (define (add-template! l)
+             (let* ([template (lab->fresh-template! l)])
+               (set! templates (cons (cons l template) templates))
+               template))
+
+           (define (I e)
+             (cond [(if? e) (explode-if e (lambda (l c t e)
+                                            (add-template! l)
+                                            (add-subtype-constraint! (label-of t) l)
+                                            (add-subtype-constraint! (label-of e) l)
+                                            (I c)
+                                            (I t)
+                                            (I e)))]
+                   [(lambda? e) (explode-lambda e (lambda (l vs c)
+                                                    (add-template! l)
+                                                    (I c)))]
+                   [(letrec? e) (explode-letrec e (lambda (l bs c)
+                                            (add-template! l)
+                                                    (for-each (lambda (binding)
+                                                                (I (cadr binding)))
+                                                              bs)
+                                                    (add-subtype-constraint! (label-of c) l)
+                                                    (I c)))]
+                   [(call? e) (explode-call e (lambda (l f as)
+                                            (add-template! l)
+                                                (I f)
+                                                (for-each (lambda (arg)
+                                                            (I arg))
+                                                          as)
+                                                ))]
+                   [(ref? e) '()]
+                   [(const? e) '()]
+                   [else 'err]))
+           (let* ([void (I expr)])
+             `((subtype-constraints ,subtype-constraints)
+               (templates ,templates))))
          )
