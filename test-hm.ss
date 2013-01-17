@@ -5,7 +5,7 @@
 
 
 
-(define labeled2 (label-transform
+(define expr (label-transform
                    `(letrec ([geometric (lambda ()
                                           (if (flip)
                                             0
@@ -22,7 +22,7 @@
                       ;;        ((termid f) (+ (termid y) 1))))))))
 
 
-(define types (infer-types labeled2 `((+ . (-> Int (-> Int Int)))
+(define types (infer-types expr `((+ . (-> Int (-> Int Int)))
                                       (cons . (-> a (-> (Lst a) (Lst a))))
                                       (car . (-> (Lst a) a))
                                       (cdr . (-> (Lst a) (Lst a)))
@@ -31,16 +31,17 @@
 
 (define label-type-map (cadr types))
 
+(pretty-print expr)
 
-(pretty-print (infer-invariants labeled2 label-type-map))
+(pretty-print (infer-invariants expr label-type-map '()))
 
 ;; 
 ;; (define termid '(lambda (x) x))
 
-;; (define labeled2 (label-transform
+;; (define expr (label-transform
 ;;                    `(lambda (f)
 ;;                       (lambda (y)
 ;;                         ((,termid f) (+ (,termid y) 1))))))
 
-;; (pretty-print labeled2)
-;; (pretty-print (infer-types labeled2 `((+ . (-> Int (-> Int Int))))))
+;; (pretty-print expr)
+;; (pretty-print (infer-types expr `((+ . (-> Int (-> Int Int))))))
