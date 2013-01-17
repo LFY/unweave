@@ -4,11 +4,11 @@
 
 
 (define labeled2 (label-transform
-                   `(letrec ([map (lambda (f xs)
-                                    (if (null? xs) '()
-                                      (cons (f (car xs))
-                                            (map f (cdr xs)))))])
-                      map)))
+                   `(letrec ([geometric (lambda ()
+                                          (if (flip)
+                                            0
+                                            (+ 1 (geometric))))])
+                      (geometric))))
                       ;; (letrec ([termid (lambda (x) x)])
                       ;;   (map (lambda (x) (+ x 1))
                       ;;        (cons 1 (cons 2 '())))))))
@@ -25,7 +25,8 @@
                                       (cons . (-> a (-> (Lst a) (Lst a))))
                                       (car . (-> (Lst a) a))
                                       (cdr . (-> (Lst a) (Lst a)))
-                                      (null? . (-> (Lst a) Bool)))))
+                                      (null? . (-> (Lst a) Bool))
+                                      (flip . (-> () Bool)))))
 
 ;; (define termid '(lambda (x) x))
 

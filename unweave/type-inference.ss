@@ -26,9 +26,11 @@
 
                  (unweave util))
         
-(define (dpp x) '())
+;; (define (dpp x) '())
 
-;; (define (dpp x) (pretty-print x))
+(define DEBUG #f)
+(define (dpp x) 
+  (if DEBUG (pretty-print x)))
 
 (define (first-letter x)
   (string->symbol (substring (symbol->string x) 0 1)))
@@ -44,7 +46,7 @@
 
 (define (primitive-type? t)
   (and (symbol? t)
-       (member t '(Int Bool Real Lst))))
+       (member t '(Int Bool Real Lst unit))))
 
 (define (type-variable? t)
   (and (symbol? t)
@@ -228,6 +230,7 @@
                  (let* ([tvar (next-type-variable!)])
                    (assign-param! t tvar)
                    tvar))]
+              [(null? t) 'unit]
               [else 'err]))
       (let* ([with-tvars (W t)])
         `(ts ,(map cdr unique-param-map)
@@ -372,10 +375,12 @@
                                                                       (map (lambda (v tv)
                                                                              (cons v tv))
                                                                            vs new-tvars)))]
-                                       [final-type (fold (lambda (next-type acc)
+                                       [final-type (if (null? vs)
+                                                     `(-> unit ,Te)
+                                                     (fold (lambda (next-type acc)
                                                            `(-> ,next-type ,acc))
                                                          Te
-                                                         (map type-scheme-body (reverse new-tvars)))])
+                                                         (map type-scheme-body (reverse new-tvars))))])
                                   
                                   (add-type! l final-type)
                                   final-type)))]
@@ -412,7 +417,9 @@
                                        (fold (lambda (next-type acc)
                                                `(-> ,next-type ,acc))
                                              Tv-res
-                                             (reverse Tvs))])
+                                             (if (null? Tvs) 
+                                               (list 'unit)
+                                               (reverse Tvs)))])
                                 (dpp `(func-type ,l ,function-type))
                                 (unify! Tf function-type)
                                 (add-type! l Tv-res)
