@@ -55,20 +55,27 @@
                                                                                   (const? x))
                                                                             '()
                                                                             (next-var!))) 
-                                                                        as)])
+                                                                        as)]
+                                                         [res-var (next-var!)])
                                                     `(letrec ,(next-lab!)
                                                        ,(append (if (null? new-f-var) '() (list (list new-f-var (A f))))
                                                                 (filter (lambda (x) (not (null? x)))
                                                                         (map (lambda (v x) (if (null? v)
-                                                                                             '() (list v (A x)))) new-vars as)))
-                                                       (call ,(next-lab!)
-                                                             ,(if (null? new-f-var) f
-                                                                `(ref ,(next-lab!)
-                                                                      ,new-f-var))
-                                                             ,@(map (lambda (v a)
-                                                                      (if (null? v) a
-                                                                        `(ref ,(next-lab!) ,v)))
-                                                                    new-vars as)))))))]
+                                                                                             '() (list v (A x)))) new-vars as))
+                                                                
+                                                                (list `(,res-var
+                                                                         (call ,(next-lab!)
+                                                                               ,(if (null? new-f-var) f
+                                                                                  `(ref ,(next-lab!)
+                                                                                        ,new-f-var))
+                                                                               ,@(map (lambda (v a)
+                                                                                        (if (null? v) a
+                                                                                          `(ref ,(next-lab!) ,v)))
+                                                                                      new-vars as))
+                                                                         ))
+                                                                )
+                                                       (ref ,(next-lab!) ,res-var)
+                                                       )))))]
                    [(letrec? e) (explode-letrec e (lambda (l bs c)
                                                     `(letrec ,(next-lab!)
                                                        ,(map (lambda (b)
@@ -149,10 +156,10 @@
                v))
 
            (define (type->fresh-template! t)
-             (cond [(primitive-type? t) `(: ,(next-lqtv!) ,t)]
+             (cond [(primitive-type? t) `(: ,(next-lqtv!) ,t ())]
                    [(arrow-type? t) `(-> ,(type->fresh-template! (arrow-type-arg t))
                                          ,(type->fresh-template! (arrow-type-res t)))]
-                   [(parametric-type? t) `((: ,(next-lqtv!) ,(car t))
+                   [(parametric-type? t) `(,(car t)
                                            ,@(map type->fresh-template! (cdr t)))]
                    [(type-variable? t) t] ;; preserve polymorphism
                    [else t]))
@@ -192,37 +199,55 @@
            (define (env-constr env template)
              `(=> ,env ,template))
 
-           ;; TODO:
-           ;; 0. A-normal-form conversion
-           ;; 1. How to associate program variables in the type?
-           ;; (-> (: K1 T4 x) ...) ?
+           (define (add-variables vs template)
+             (define (template? t)
+               (and (pair? t)
+                    (equal? ': (car t))))
+             (define (loop vs current)
+               (if (null? vs) current
+                 `(-> ,(let* ([t (arrow-type-arg current)])
+                         (if (template? t)
+                           `(: ,(cadr t) ,(caddr t) ,(car vs))
+                           `(: ,(next-lqtv!) ,t ,(car vs))))
+                      ,(loop (cdr vs) (arrow-type-res current)))))
+             (loop vs template))
+
+           (define (extract-vars args f-constr)
+             (if (null? args) '()
+               (cons (cadddr (arrow-type-arg f-constr))
+                     (extract-vars (cdr args)
+                                   (arrow-type-res f-constr)))))
 
            (define (I e env)
              (cond [(if? e) (explode-if e (lambda (l c t e)
                                             (let* ([template (get-template! l)]
                                                    [c-constr (I c env)]
-                                                   [t-constr (I t env)]
-                                                   [e-constr (I e env)])
-                                              (cons template (append (ret->constr c-constr)
-                                                                     (ret->constr t-constr)
-                                                                     (ret->constr e-constr)
-                                                                     (list
-                                                                       (env-constr env template)
-                                                                       (env-constr (ext (next-ectv!) t env) 
-                                                                                   `(<: ,(ret->template t-constr) ,template))
-                                                                       (env-constr (ext (next-ectv!) `(call a666 (ref a666 not) ,t) env) 
-                                                                                   `(<: ,(ret->template e-constr) ,template))))))))]
+                                                   [then-condition (ext (next-ectv!) c env)]
+                                                   [else-condition (ext (next-ectv!) `(call a666 (ref a666 not) ,c) env)]
+                                                   [t-constr (I t then-condition)]
+                                                   [e-constr (I e else-condition)]
+                                                   [res (cons template (append (ret->constr c-constr)
+                                                                               (ret->constr t-constr)
+                                                                               (ret->constr e-constr)
+                                                                               (list
+                                                                                 (env-constr env template)
+                                                                                 (env-constr then-condition 
+                                                                                             `(<: ,(ret->template t-constr) ,template))
+                                                                                 (env-constr else-condition 
+                                                                                             `(<: ,(ret->template e-constr) ,template)))))])
+                                                   res)))]
                    [(lambda? e) (explode-lambda e (lambda (l vs c)
                                                     (let* ([template (get-template! l)]
                                                            [vs* (if (null? vs) '(())
                                                                   vs)]
+                                                           [template+vars (add-variables vs* template)]
                                                            [var+arg-types (letrec ([loop (lambda (vars-left curr-arrow-type)
                                                                                            (if (null? vars-left) '()
                                                                                            (cons (cons (car vars-left) 
                                                                                                        (arrow-type-arg curr-arrow-type))
                                                                                                  (loop (cdr vars-left) 
                                                                                                        (arrow-type-res curr-arrow-type)))))])
-                                                                            (loop vs* template))]
+                                                                            (loop vs* template+vars))]
                                                            [next-env (fold (lambda (var-type curr-env)
                                                                              (ext (car var-type)
                                                                                   (cdr var-type)
@@ -230,17 +255,20 @@
                                                                            env
                                                                            var+arg-types)])
                                                       (let* ([c-constr (I c next-env)])
-                                                        (cons template (append (ret->constr c-constr)
-                                                                               (list (env-constr env template)
-                                                                                     (env-constr next-env `(<: ,(ret->constr c-constr)
-                                                                                                               ,(arrow-type-res template))))))))))]
+                                                        (cons template+vars (append (ret->constr c-constr)
+                                                                               (list (env-constr env template+vars)
+                                                                                     (env-constr next-env `(<: ,(ret->template c-constr)
+                                                                                                               ,(fold (lambda (next acc)
+                                                                                                                        (arrow-type-res acc))
+                                                                                                                      template+vars
+                                                                                                                      vs*))))))))))]
                    [(letrec? e) (explode-letrec e (lambda (l bs c)
                                                     (let* ([template (get-template! l)]
                                                            [other-constraints '()]
                                                            [local-binding-env
                                                              (fold (lambda (next-binding curr-env)
                                                                      (let* ([placeholder-template 
-                                                                              `(: ,(next-lqtv!) ,(get-template! (cadr (cadr next-binding))))]
+                                                                              (get-template! (cadr (cadr next-binding)))]
                                                                             [next (I (cadr next-binding)
                                                                                      (ext (car next-binding)
                                                                                           placeholder-template
@@ -252,21 +280,29 @@
                                                            [c-constr (I c local-binding-env)]
                                                            [c-template (ret->template c-constr)]
                                                            [c-constraints (ret->constr c-constr)])
-                                                      (cons template (append other-constraints
-                                                                             (list (env-constr env template)
-                                                                                   (env-constr env `(<: ,c-template ,template))))))))]
+                                                      (cons template (append other-constraints c-constraints
+                                                                             (list (env-constr local-binding-env template)
+                                                                                   (env-constr local-binding-env `(<: ,c-template ,template))))))))]
                    [(call? e) (explode-call e (lambda (l f as)
                                                 (let* ([template (get-template! l)]
                                                        [f-constr (I f env)]
+                                                       [f-template (ret->template f-constr)]
                                                        [args-constrs (map (lambda (a) (I a env)) as)])
-
-                                                  (cons `(sub ,f ,as ,template)
+                                                  (cons `(substitute ,(map (lambda (v a)
+                                                                             `(,v ,a))
+                                                                           (extract-vars as f-template)
+                                                                           (map ret->template args-constrs)
+                                                                           )
+                                                                     ,f-template)
                                                         (append (ret->constr f-constr)
                                                                 (apply append (map cdr args-constrs))
                                                                 )))))]
                    [(ref? e) (let* ([template (get-template! (ref->lab e))])
                                (if (primitive-type? (unwrap-template template))
-                                 (cons `(== V ,(ref->var e)) '())
+                                 (cons `(rf (V ,(caddr template))
+                                            (== V ,(ref->var e))
+                                            ,(caddr template)
+                                            ,(ref->var e)) '())
                                  (cons (lkup (ref->var e) env) '())))]
                    [(const? e) (let* ([template (get-template! (cadr e))])
                                  (cons template '()))]
