@@ -7,8 +7,9 @@
 
 (define expr (anf (label-transform
                    `(letrec ([max (lambda (x y)
-                                    (if (> x y) x y))])
-                      (max 3 4)))))
+                                    (if (> x y) 
+                                      x y))])
+                      max))))
 
 (pretty-print expr)
 
@@ -28,22 +29,22 @@
 (define label-type-map (cadr types))
 
 
-(pretty-print (infer-invariants expr label-type-map '((flip . (-> () (: (rf (V Bool) (or (= true V) (= false V))))))
-                                                      (+ . (-> (: (rf (V Int) ()) Int x)
-                                                               (-> (: (rf (V Int) ()) Int y)
+(pretty-print (infer-invariants expr label-type-map '((unit . (: (rf (V unit) true) unit ()))
+                                                      (flip . (-> () (: (rf (V Bool) (or (= true V) (= false V))) Bool ())))
+                                                      (+ . (-> (: (rf (V Int) true) Int x)
+                                                               (-> (: (rf (V Int) true) Int y)
                                                                    (: (rf (V Int) (= V (+ x y))) Int ()))))
-                                                      (- . (-> (: (rf (V Int) ()) Int x)
-                                                               (-> (: (rf (V Int) ()) Int y)
+                                                      (- . (-> (: (rf (V Int) true) Int x)
+                                                               (-> (: (rf (V Int) true) Int y)
                                                                    (: (rf (V Int) (= V (- x y))) Int ()))))
-                                                      (* . (-> (: (rf (V Int) ()) Int x)
-                                                               (-> (: (rf (V Int) ()) Int y)
+                                                      (* . (-> (: (rf (V Int) true) Int x)
+                                                               (-> (: (rf (V Int) true) Int y)
                                                                    (: (rf (V Int) (= V (* x y))) Int ()))))
-                                                      (= . (-> (: (rf (V Int) ()) Int x)
-                                                               (-> (: (rf (V Int) ()) Int y)
+                                                      (= . (-> (: (rf (V Int) true) Int x)
+                                                               (-> (: (rf (V Int) true) Int y)
                                                                    (: (rf (V Bool) (= V (== x y))) Bool ()))))
-                                                      (> . (-> (: (rf (V Int) ()) Int x)
-                                                               (-> (: (rf (V Int) ()) Int y)
-                                                                   (: (rf (V Bool) (= V (> x y))) Bool ()))))
-                                                      )))
+                                                      (> . (-> (: (rf (V Int) true) Int x)
+                                                               (-> (: (rf (V Int) true) Int y)
+                                                                   (: (rf (V Bool) (= V (> x y))) Bool ())))))))
 
 

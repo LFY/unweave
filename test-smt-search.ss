@@ -12,20 +12,20 @@
 
 ;; XOR
 
-(define (test-xor)
-  (smt-mh-query
-   100
-   5
-   '(letrec ([a (xrp flip-scorer flip flip-prop 0 1)]
-             [b (xrp flip-scorer flip flip-prop 0 1)])
-      (cons a (cons b '())))
-   '(lambda (ab)
-      (letrec ([a (car ab)]
-               [b (car (cdr ab))])
-        (= (+ (* a (- 1 b))
-              (* (- 1 a) b))
-           1))
-      (-> (Lst Int) Bool))))
+;; (define (test-xor)
+;;   (smt-mh-query
+;;    100
+;;    5
+;;    '(letrec ([a (xrp flip-scorer flip flip-prop 0 1)]
+;;              [b (xrp flip-scorer flip flip-prop 0 1)])
+;;       (cons a (cons b '())))
+;;    '(lambda (ab)
+;;       (letrec ([a (car ab)]
+;;                [b (car (cdr ab))])
+;;         (= (+ (* a (- 1 b))
+;;               (* (- 1 a) b))
+;;            1))
+;;       (-> (Lst Int) Bool))))
 
 
 ;; Open-universe Ising
@@ -83,8 +83,8 @@
 
 
 (define (main)
-  (pretty-print (bin (test-xor)))
-  (for-each pretty-print (test-ising))
+  ;; (pretty-print (bin (test-xor)))
+  ;; (for-each pretty-print (test-ising))
   (for-each pretty-print (test-sorted-list)))
 
 
