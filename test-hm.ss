@@ -19,23 +19,31 @@
 ;;                       max))))
 
 
+;; (define expr (anf (label-transform
+;;                     `(letrec ([map (lambda (f xs)
+;;                                      (if (null? xs) '()
+;;                                        (cons (f (car xs))
+;;                                              (map f (cdr xs)))))])
+;;                        (map (lambda (x) (+ x 1))
+;;                             (cons 1 (cons 2 (cons 3 '()))))))))
+
+(pretty-print expr)
+
 (define types (infer-types expr `((+ . (-> Int (-> Int Int)))
                                   (- . (-> Int (-> Int Int)))
                                   (* . (-> Int (-> Int Int)))
                                   (= . (-> Int (-> Int Bool)))
                                   (> . (-> Int (-> Int Bool)))
                                   (cons . (-> a (-> (Lst a) (Lst a))))
+                                  (() . (Lst a))
                                   (car . (-> (Lst a) a))
                                   (cdr . (-> (Lst a) (Lst a)))
                                   (null? . (-> (Lst a) Bool))
                                   (flip . (-> () Bool)))))
 
-(pretty-print expr)
 (pretty-print types)
 
-(define label-type-map (cadr types))
-
-
+(define label-type-map (cadr types)) 
 (pretty-print (infer-invariants expr label-type-map '((unit . (: (rf (V unit) true) unit ()))
                                                       (flip . (-> () (: (rf (V Bool) (or (= true V) (= false V))) Bool ())))
                                                       (+ . (-> (: (rf (V Int) true) Int x)

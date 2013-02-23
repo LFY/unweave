@@ -497,7 +497,7 @@
                       `(declare-const ,var ,type))))
                 var-types))
 
-         (define (state->nonrec-model-finder state extra-stmts)
+         (define (state->model-finder state extra-stmts)
            (define (convert-null expr)
              (cond [(null? expr) '()]
                    [(pair? expr) (cond [(and (equal? '= (car expr))
@@ -544,19 +544,19 @@
                   [postprocessed-extra-stmts (convert-null (convert-negative-numbers (convert-boolean-literals extra-stmts)))]
                   [decls (var-type-map->declarations (hash-table->alist (state->var-type-map state)))]
                   ;; [void (pretty-print (hash-table->alist (state->var-type-map state)))]
-                  [no-recursion-constraint (map (lambda (var)
-                                                  `(assert (= ,var false)))
-                                                (filter (lambda (var)
-                                                          (equal? "R" (substring (symbol->string var) 0 1)))
-                                                        (map car (hash-table->alist (state->var-type-map state)))))]
+                  ;; [no-recursion-constraint (map (lambda (var)
+                  ;;                                 `(assert (= ,var false)))
+                  ;;                               (filter (lambda (var)
+                  ;;                                         (equal? "R" (substring (symbol->string var) 0 1)))
+                  ;;                                       (map car (hash-table->alist (state->var-type-map state)))))]
                   [header `((declare-sort Clo 0) ;; an uninterpreted sort for closure values
                             (declare-datatypes (T) ((Lst nil (cons (car T) (cdr Lst))))))]
-                  [z3-stmts `(,@header ,@decls ,@stmts ,@no-recursion-constraint ,@postprocessed-extra-stmts (check-sat) (get-model))])
+                  [z3-stmts `(,@header ,@decls ,@stmts ,@postprocessed-extra-stmts (check-sat) (get-model))])
              
              z3-stmts))
 
          (define (check-state state extra-stmts)
-           (let* ([z3-result (run-z3 (state->nonrec-model-finder state extra-stmts))]
+           (let* ([z3-result (run-z3 (state->model-finder state extra-stmts))]
                   [sat? (equal? 'sat (car z3-result))])
              (if sat?
                (z3-result->assignment (cdr (cadr z3-result)))
@@ -571,6 +571,13 @@
                   [void (when (not (null? continue-thunks)) ((car continue-thunks)))]
                   [next-state ((state->refresh state))])
              next-state))
+
+         (define (make-nonrec-constr state)
+           (map (lambda (var)
+                  `(assert (= ,var false)))
+                (filter (lambda (var)
+                          (equal? "R" (substring (symbol->string var) 0 1)))
+                        (map car (hash-table->alist (state->var-type-map state))))))
 
          (define (smt-solve max-depth program constraint)
            (define body `(assert ,program ,constraint))
@@ -594,14 +601,21 @@
              (define (expand state)
                (advance-state! state))
 
-             (define (find-further-solutions state sols)
+             (define (make-ineq-constr prev-sols)
                (define (ineq-stmt var val)
                  `(assert (not (= ,var ,val))))
-               (let* ([next-result (state->smt-result state (map (lambda (sol)
-                                                                   (let* ([var (car sol)]
-                                                                          [val (cadr sol)])
-                                                                     (ineq-stmt var val)))
-                                                                 sols))])
+               (map (lambda (sol)
+                      (let* ([var (car sol)]
+                             [val (cadr sol)])
+                        (ineq-stmt var val)))
+                    prev-sols))
+
+
+             (define (find-further-solutions state sols)
+               (let* ([next-result (state->smt-result state 
+                                                      (append
+                                                        (make-nonrec-constr state)
+                                                        (make-ineq-constr sols)))])
                  (if (sat? next-result)
                    (let* ([sol (assoc (car (state->final state)) next-result)])
                      (pretty-print sol)
@@ -612,15 +626,14 @@
              (define (loop curr-depth state)
                (if (> curr-depth max-depth)
                  'unknown
-                 (let* ([solve-result (state->smt-result state '())])
+                 (let* ([solve-result (state->smt-result state (make-nonrec-constr state))])
                    (if (sat? solve-result)
                      state
-                     ;; (let* ([next-sol (assoc (car (state->final state)) solve-result)])
-                       ;; (cons next-sol solve-result))
-                       ;; state)
-                     ;; (cons next-sol ;; `(assignment: ;; ,solve-result) (find-further-solutions state (list next-sol))))
-                     (loop (+ curr-depth 1)
-                           (expand state))))))
+                     (let* ([rec-solve-result (state->smt-result state '())])
+                       (if (sat? solve-result)
+                         (loop (+ curr-depth 1)
+                               (expand state))
+                         'no-solutions))))))
              (loop 0 initial-state))
 
            (search max-depth initial-state))
@@ -631,7 +644,7 @@
              (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e)) (cdr v-e)
                                                   (label-transform (cdr v-e))))) default-env))
            (let* ([state (smt-evaluator labeled-body labeled-env '(top))])
-             (list state (check-state state '()))))
+             (list state (check-state state (make-nonrec-constr state)))))
 
          (define (run-state-with-assignment max-search-depth assignment state)
 
@@ -652,7 +665,8 @@
            (define (loop curr-depth state)
              (if (> curr-depth max-search-depth)
                'unknown
-               (let* ([solve-result (check-state state assignment-constraint)])
+               (let* ([solve-result (check-state state (append (make-nonrec-constr state) 
+                                                               assignment-constraint))])
                  (if (sat? solve-result)
                    (list state solve-result)
                    (loop (+ curr-depth 1)
@@ -807,7 +821,8 @@
              (if (or (>= (length previous-assignments) max-assignments)
                      (> curr-depth max-search-depth))
                (list state solutions)
-               (let* ([solve-result (check-state state (append (map assignment->disequality-constraint previous-assignments)
+               (let* ([solve-result (check-state state (append (make-nonrec-constr state)
+                                                               (map assignment->disequality-constraint previous-assignments)
                                                                extra-constraints))])
                  (if (sat? solve-result)
                    (loop curr-depth 

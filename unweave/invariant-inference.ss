@@ -117,16 +117,15 @@
                                                               ,(k `(ref ,(next-lab!) ,res-var))
                                                               ))))))]
                    [(letrec? e) (explode-letrec e (lambda (l bs c)
-                                                    (reset 
-                                                      `(letrec ,(next-lab!)
-                                                         ,(map (lambda (b)
-                                                                 `(,(car b) ,(if (shallow-call? (cadr b))
-                                                                               (N (cadr b))
-                                                                               (A (cadr b)))))
-                                                               bs)
-                                                         ,(if (shallow-call? c)
-                                                            (N c)
-                                                            (A c))))))]
+                                                    `(letrec ,(next-lab!)
+                                                       ,(map (lambda (b)
+                                                               `(,(car b) ,(if (shallow-call? (cadr b))
+                                                                             (N (cadr b))
+                                                                             (reset (A (cadr b))))))
+                                                             bs)
+                                                       ,(if (shallow-call? c)
+                                                          (N c)
+                                                          (reset (A c))))))]
                    [else e]))
 
            (let* ([answer (reset (A expr))])
@@ -392,23 +391,18 @@
 
            (define (re-project new-asn) (map run-z3 (map make-smt-prog (lift-invariants2 new-asn initial-sol var-type-map constraint-types))))
            (define (re-project-single c t new-asn)
-             (let* ([void (pretty-print `(before-lift ,c))]
-                    [lifted (car (lift-invariants2 new-asn 
+             (let* ([lifted (car (lift-invariants2 new-asn 
                                                    (list c) 
                                                    var-type-map 
                                                    (list t)))]
-                    [void (pretty-print `(lifted ,lifted))]
                     [to-compute (make-smt-prog lifted)])
-               (pretty-print `(re-project ,to-compute))
                (run-z3 to-compute)))
            (define (weaken asn v qualifiers raw-constr raw-constr-type)
              (define (good? candidate)
                (hash-table-set! asn v candidate)
                (let* ([res (re-project-single raw-constr raw-constr-type asn)])
-                 (pretty-print `(weaken-check ,v ,candidate ,res))
                  (valid? res)))
              (define (loop qualifiers working-qualifiers)
-               (pretty-print `(weaken-loop ,qualifiers ,working-qualifiers))
                (if (null? qualifiers) working-qualifiers
                  (let* ([good-qualifier? (map good? (map (lambda (q)
                                                            (cons q working-qualifiers))
@@ -430,26 +424,23 @@
            (define (subtype-constr? c) (subtype? (cadr c)))
            (define (convert-raw c) c)
 
+           (define (satisfied? z3-res is-subtype-constr?)
+             (or (not is-subtype-constr?)
+                 (and (valid? z3-res)
+                      is-subtype-constr?)))
+
            (let* ([progs (map make-smt-prog (lift-invariants2 initial-asn initial-sol var-type-map constraint-types))]
-                  [smt-results (map run-z3 progs)]
-                  [void (for-each pretty-print (zip responsible-variables
-                                                    (map (lambda (v)
-                                                           (hash-table-ref initial-asn (car v)))
-                                                         responsible-variables)
-                                                    initial-sol progs smt-results))])
+                  [smt-results (map run-z3 progs)])
              (letrec ([loop (lambda (curr-results curr-asn)
-                              (pretty-print `(solve-loop ,curr-results ,(hash-table->alist curr-asn)))
-                              (let* ([done? (all (lambda (r-b)
-                                                   (or (not (cadr r-b))
-                                                       (and (valid? (car r-b))
-                                                            (cadr r-b))))
+                              (pretty-print `(solve-loop ,(map satisfied? curr-results subtype-constr-table) 
+                                                         ,(hash-table->alist curr-asn)))
+                              (let* ([done? (all (lambda (rb) (satisfied? (car rb) (cadr rb)))
                                                  (zip curr-results subtype-constr-table))])
                                 (if done? (hash-table->alist curr-asn)
                                   (let* ([next-asn (hash-table-copy curr-asn equal?)]
                                          [next-unsat-idx (first-index-of 
                                                            (lambda (e-b) 
-                                                             (and (not (valid? (car e-b)))
-                                                                  (cadr e-b)))
+                                                             (not (satisfied? (car e-b) (cadr e-b))))
                                                            (zip curr-results subtype-constr-table))]
                                          [raw-constr (convert-raw (list-ref initial-sol next-unsat-idx))]
                                          [vars (list-ref responsible-variables next-unsat-idx)])
