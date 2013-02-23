@@ -6,21 +6,16 @@
 ;; (define expr (label-transform
 ;;                `(letrec ([id (lambda (x) x)])
 ;;                   (id (lambda (x) (id (+ x 1)))))))
-(define expr (anf (label-transform
-               `(letrec ([geometric (lambda ()
-                                      (if (flip) 0 
-                                        (letrec ([x (geometric)])
-                                          (+ 1 x))))])
-                  (geometric)))))
 ;; (define expr (anf (label-transform
-;;                     `(letrec ([geometric (lambda ()
-;;                                            (if (flip) 0 (+ 1 (geometric))))])
-;;                        (geometric)))))
-
+;;                `(letrec ([geometric (lambda ()
+;;                                       (if (flip) 0 
+;;                                         (letrec ([x (geometric)])
+;;                                           (+ 1 x))))])
+;;                   (geometric)))))
+(define expr (anf (label-transform 
+                    `(letrec ([geometric (lambda () (if (flip) 0 (+ 1 (geometric))))]) (geometric)))))
 ;; (define expr (anf (label-transform
-;;                    `(letrec ([max (lambda (x y)
-;;                                     (if (> x y) 
-;;                                       x y))])
+;;                    `(letrec ([max (lambda (x y) (if (> x y) x y))])
 ;;                       max))))
 
 
@@ -54,7 +49,7 @@
                                                                    (: (rf (V Int) (= V (* x y))) Int ()))))
                                                       (= . (-> (: (rf (V Int) true) Int x)
                                                                (-> (: (rf (V Int) true) Int y)
-                                                                   (: (rf (V Bool) (= V (== x y))) Bool ()))))
+                                                                   (: (rf (V Bool) (= V (= x y))) Bool ()))))
                                                       (> . (-> (: (rf (V Int) true) Int x)
                                                                (-> (: (rf (V Int) true) Int y)
                                                                    (: (rf (V Bool) (= V (> x y))) Bool ())))))))

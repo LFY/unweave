@@ -25,6 +25,30 @@
 
                  (unweave type-inference))
 
+         (define (let-split expr)
+           (define lab-ctr 0)
+           (define (next-lab!)
+             (let* ([v (string->symbol (string-append "s" (number->string lab-ctr)))])
+               (set! lab-ctr (+ 1 lab-ctr))
+               v))
+           (cond [(letrec? expr)
+                  (explode-letrec expr (lambda (l bs c)
+                                         (if (null? (cdr bs))
+                                           `(letrec ,(next-lab!) ,bs ,c)
+                                           `(letrec ,(next-lab!) ,(list (car bs))
+                                              ,(let-split
+                                                 `(letrec (next-lab!) ,(cdr bs) ,c))))))]
+                 [(lambda? expr)
+                  (explode-lambda expr (lambda (l vs c)
+                                         `(lambda ,l ,vs ,(let-split c))))]
+                 [(if? expr)
+                  (explode-if expr (lambda (l c t e)
+                                     `(if ,l ,(let-split c) ,(let-split t) ,(let-split e))))]
+                 [(call? expr)
+                  (explode-call expr (lambda (l f as)
+                                       `(call ,l ,(let-split f) ,@(map let-split as))))]
+                 [else expr]))
+
          (define (anf expr)
 
            (define lab-ctr 0)
@@ -57,12 +81,11 @@
                                                     `(lambda ,l ,vs ,(reset (A call)))))]
                    [(if? e) (explode-if e (lambda (l c t e)
                                             (let* ([cv (next-var!)])
-                                              (reset 
                                                 `(letrec ,(next-lab!)
                                                    ([,cv ,(A c)])
                                                    (if ,(next-lab!) (ref ,(next-lab!) ,cv)
-                                                     ,(A t)
-                                                     ,(A e)))))))]
+                                                     ,(reset (A t))
+                                                     ,(reset (A e)))))))]
                    [(call? e) (explode-call e (lambda (l f as)
                                                 (if (null? as) e
                                                   (let* ([new-f-var (if (ref? f) '() (next-var!))]
@@ -108,6 +131,7 @@
 
            (let* ([answer (reset (A expr))])
              answer))
+
 
          ;; data Template = (: Refinement ActualType CorrespondingVar) | Template -> Template
          ;; data Refinement = LiquidTypeVariable Sym | (rf (V Type) <formula>)
@@ -329,7 +353,7 @@
                    [(ref? e) (let* ([template (get-template! (ref->lab e))])
                                (if (primitive-type? (unwrap-template template))
                                  (cons `(rf (V ,(caddr template))
-                                            (and (== V ,(ref->var e)))) '())
+                                            (and (= V ,(ref->var e)))) '())
                                  (cons (lkup (ref->var e) env) '())))]
                    [(const? e) (let* ([template (get-template! (cadr e))])
                                  (cond [(number? (const->val e))
@@ -370,9 +394,9 @@
            (define (re-project-single c t new-asn)
              (let* ([void (pretty-print `(before-lift ,c))]
                     [lifted (car (lift-invariants2 new-asn 
-                                              (list c) 
-                                              var-type-map 
-                                              (list t)))]
+                                                   (list c) 
+                                                   var-type-map 
+                                                   (list t)))]
                     [void (pretty-print `(lifted ,lifted))]
                     [to-compute (make-smt-prog lifted)])
                (pretty-print `(re-project ,to-compute))
@@ -404,42 +428,44 @@
            (define subtype-constr-table (map subtype-constr? initial-sol))
 
            (define (subtype-constr? c) (subtype? (cadr c)))
-           (define (convert-raw c)
-             c)
-             ;; (cond [(subtype? (cadr c)) c]
-                   ;; [else `(() ,(cadr c) ,(caddr c))]))
+           (define (convert-raw c) c)
 
-             (let* ([progs (map make-smt-prog (lift-invariants2 initial-asn initial-sol var-type-map constraint-types))]
-                    [smt-results (map run-z3 progs)])
-               (letrec ([loop (lambda (curr-results curr-asn)
-                                (pretty-print `(solve-loop ,curr-results ,(hash-table->alist curr-asn)))
-                                (let* ([done? (all (lambda (r-b)
-                                                     (or (not (cadr r-b))
-                                                         (and (valid? (car r-b))
-                                                              (cadr r-b))))
-                                                   (zip curr-results subtype-constr-table))])
-                                  (if done? (hash-table->alist curr-asn)
-                                    (let* ([next-asn (hash-table-copy curr-asn equal?)]
-                                           [next-unsat-idx (first-index-of 
-                                                             (lambda (e-b) 
-                                                               (and (not (valid? (car e-b)))
-                                                                    (cadr e-b)))
-                                                             (zip curr-results subtype-constr-table))]
-                                           [raw-constr (convert-raw (list-ref initial-sol next-unsat-idx))]
-                                           [vars (list-ref responsible-variables next-unsat-idx)])
-                                      (if (null? vars) 'no-soln
-                                        (let* ([var (car vars)]
-                                               [raw-constr-type (list-ref constraint-types next-unsat-idx)]
-                                               [weakened-qualifiers (weaken next-asn var (hash-table-ref curr-asn var) raw-constr raw-constr-type)]
-                                               [void (hash-table-set! next-asn var weakened-qualifiers)]
-                                               [contradict? (not (valid? (re-project-single raw-constr raw-constr-type next-asn)))])
-                                          (if contradict? 'no-soln
-                                            (loop 
-                                              (re-project next-asn)
-                                              next-asn))))))))])
-                 (loop smt-results initial-asn))))
+           (let* ([progs (map make-smt-prog (lift-invariants2 initial-asn initial-sol var-type-map constraint-types))]
+                  [smt-results (map run-z3 progs)]
+                  [void (for-each pretty-print (zip responsible-variables
+                                                    (map (lambda (v)
+                                                           (hash-table-ref initial-asn (car v)))
+                                                         responsible-variables)
+                                                    initial-sol progs smt-results))])
+             (letrec ([loop (lambda (curr-results curr-asn)
+                              (pretty-print `(solve-loop ,curr-results ,(hash-table->alist curr-asn)))
+                              (let* ([done? (all (lambda (r-b)
+                                                   (or (not (cadr r-b))
+                                                       (and (valid? (car r-b))
+                                                            (cadr r-b))))
+                                                 (zip curr-results subtype-constr-table))])
+                                (if done? (hash-table->alist curr-asn)
+                                  (let* ([next-asn (hash-table-copy curr-asn equal?)]
+                                         [next-unsat-idx (first-index-of 
+                                                           (lambda (e-b) 
+                                                             (and (not (valid? (car e-b)))
+                                                                  (cadr e-b)))
+                                                           (zip curr-results subtype-constr-table))]
+                                         [raw-constr (convert-raw (list-ref initial-sol next-unsat-idx))]
+                                         [vars (list-ref responsible-variables next-unsat-idx)])
+                                    (if (null? vars) 'no-soln
+                                      (let* ([var (car vars)]
+                                             [raw-constr-type (list-ref constraint-types next-unsat-idx)]
+                                             [weakened-qualifiers (weaken next-asn var (hash-table-ref curr-asn var) raw-constr raw-constr-type)]
+                                             [void (hash-table-set! next-asn var weakened-qualifiers)]
+                                             [contradict? (not (valid? (re-project-single raw-constr raw-constr-type next-asn)))])
+                                        (if contradict? 'no-soln
+                                          (loop 
+                                            (re-project next-asn)
+                                            next-asn))))))))])
+               (loop smt-results initial-asn))))
          ;; Templates
-         
+
          (define (template? t)
            (and (pair? t)
                 (equal? ': (car t))))
@@ -583,14 +609,14 @@
                  ;; (pretty-print `(filtered-variables ,(filter (lambda (v) (and (assoc v var-type-map)
                  ;;                                                              (equal? 'Int (cdr (assoc v var-type-map))))) 
                  ;;                                             variables)))
-                 (possible-primitive-predicates (cons 'V (filter (lambda (v) (and (assoc v var-type-map)
-                                                                                  (equal? 'Int (cdr (assoc v var-type-map))))) 
-                                                                 variables)))))
+                 (possible-primitive-predicates 
+                   (cons 'V (filter (lambda (v) (and (assoc v var-type-map)
+                                                     (equal? 'Int (cdr (assoc v var-type-map))))) 
+                                    variables)))))
              (define (get-variables constr)
                (define (loop c)
                  (cond [(refinement? c) '()]
-                       [(subtype? c) (append (get-variables (cadr c))
-                                             (get-variables (caddr c)))]
+                       [(subtype? c) (get-variables (cadr c))]
                        [(template? c) (if (and (template-variable? (cadr c))
                                                (equal? 'Int (caddr c)))
                                         (list (cadr c))
@@ -655,7 +681,7 @@
 
          (define (lift-invariants2 asn constraints var-type-map constraint-types)
            (define (lookup-var v)
-             (let* ([lookup-res (hash-table-ref asn v (lambda () 'not-found))])
+             (let* ([lookup-res (hash-table-ref asn v (lambda () '()))])
                lookup-res))
            (define (subtype? constr)
              (and (pair? constr)
@@ -720,20 +746,25 @@
 
            (define (guard-predicate? binding)
              (equal? "E" (substring (symbol->string (car binding)) 0 1)))
+
+           (define (replace-refinement bindings body)
+             (cond [(template? body)
+                    (let* ([refinement (cadr body)])
+                      ;; (pretty-print `(wtf ,refinement))
+                      (replace-refinement bindings refinement))]
+                   [(refinement? body)
+                    (let* ([to-replace (caddr body)])
+                      ;; (pretty-print `(will-replace ,body))
+                      (search-and-replace bindings to-replace))]
+                   [else body]))
+           (define (refinement-binding? binding)
+             (refinement? (cdr binding)))
+           (define (transform-refinement v ref)
+             (replace-refinement `((V . ,v)) ref))
            (define (template-binding? binding) 
              ;; (pretty-print `(template-binding? ,binding))
              (template? (cdr binding)))
            (define (transform-template v temp)
-             (define (replace-refinement bindings body)
-               (cond [(template? body)
-                      (let* ([refinement (cadr body)])
-                        ;; (pretty-print `(wtf ,refinement))
-                        (replace-refinement bindings refinement))]
-                     [(refinement? body)
-                      (let* ([to-replace (caddr body)])
-                        ;; (pretty-print `(will-replace ,body))
-                        (search-and-replace bindings to-replace))]
-                     [else body]))
              (replace-refinement `((V . ,v)) temp))
            (define (transform-guard-predicate pred)
              (de-label pred '()))
@@ -743,15 +774,17 @@
              (filter (lambda (x) 
                        (begin 
                          ;;(pretty-print `(x: ,x))
-                              (and
-                                   (not (arrow-binding? x))
-                                   (not (unit? x)))))
+                         (and
+                           (not (arrow-binding? x))
+                           (not (unit? x)))))
                      env))
            (define (transform-guards env)
              (map (lambda (binding)
                     ;; (pretty-print `(transform-guards: ,binding))
                     (cond 
                       [(template-binding? binding) (cons (car binding) (transform-template (car binding) (cdr binding)))]
+                      [(refinement-binding? binding)
+                       (cons (car binding) (transform-refinement (car binding) (cdr binding)))]
                       [(guard-predicate? binding) (cons (car binding) (transform-guard-predicate (cdr binding)))]
                       [else binding]))
                   env))
@@ -784,7 +817,6 @@
                        (decls
                          (declare-const V ,constraint-type)
                          ,@(map (lambda (var-val)
-                                  ;; (pretty-print `(curr-binding ,var-val))
                                   `(declare-const ,(car var-val) ,(cdr (assoc (car var-val) var-type-map))))
                                 (filter (lambda (binding)
                                           (and (not (equal? 'unit (car binding)))
@@ -806,7 +838,7 @@
                    [else e]))
            (let* ([decls (cdr (cadr smt-struct))]
                   [body (cdr (caddr smt-struct))])
-           `(,@decls ,@(map to-smt body) (check-sat) (get-model))))
+             `(,@decls ,@(map to-smt body) (check-sat) (get-model))))
 
          (define (weaken sub bad-qualifiers)
            '())

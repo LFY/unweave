@@ -57,6 +57,7 @@
             [assignment-expr (with-input-from-string assignment read)])
        (system (format "rm ~s" z3-script-file))
        (system (format "rm ~s" z3-output-file))
+       ;; (display `(z3-run ,sat-unsat)) (newline)
        (list sat-unsat assignment-expr))))
 
  (define (z3-result->assignment assignment-expr)
