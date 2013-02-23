@@ -3,15 +3,26 @@
         (unweave external labeling)
         (only (scheme-tools) pretty-print))
 
-
-
+;; (define expr (label-transform
+;;                `(letrec ([id (lambda (x) x)])
+;;                   (id (lambda (x) (id (+ x 1)))))))
 (define expr (anf (label-transform
-                   `(letrec ([max (lambda (x y)
-                                    (if (> x y) 
-                                      x y))])
-                      max))))
+               `(letrec ([geometric (lambda ()
+                                      (if (flip) 0 
+                                        (letrec ([x (geometric)])
+                                          (+ 1 x))))])
+                  (geometric)))))
+;; (define expr (anf (label-transform
+;;                     `(letrec ([geometric (lambda ()
+;;                                            (if (flip) 0 (+ 1 (geometric))))])
+;;                        (geometric)))))
 
-(pretty-print expr)
+;; (define expr (anf (label-transform
+;;                    `(letrec ([max (lambda (x y)
+;;                                     (if (> x y) 
+;;                                       x y))])
+;;                       max))))
+
 
 (define types (infer-types expr `((+ . (-> Int (-> Int Int)))
                                   (- . (-> Int (-> Int Int)))
@@ -24,6 +35,7 @@
                                   (null? . (-> (Lst a) Bool))
                                   (flip . (-> () Bool)))))
 
+(pretty-print expr)
 (pretty-print types)
 
 (define label-type-map (cadr types))

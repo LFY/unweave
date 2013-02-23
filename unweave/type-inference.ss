@@ -407,14 +407,10 @@
                                  (let* ([local-binding-env
                                           (fold (lambda (b e)
                                                   (let* ([Bv (next-type-variable!)]
-
-                                                         ;; This is because generalization relies on inspecting whether the free types in the definition occur in any other type. We are not 'serious' about this type variable, but any type variable occuring in the binding expression will occur in Bv, prohibiting any generalization. so we block it out by adding it to a 'forbidden' set.
-                                                         
                                                          [void (set! forbidden-free (cons Bv forbidden-free))]
-
                                                          [new-type (make-type-scheme '() Bv)]
-                                                         [b-type (generalize (lambda () (T (cadr b) 
-                                                                                           (tenv-ext e (car b) new-type))))])
+                                                         [b-type (generalize (lambda () (T (cadr b) (tenv-ext e (car b) new-type))))])
+                                                    (unify! Bv (type-scheme-body b-type))
                                                     (dpp `(adding-binding ,(car b)))
                                                     (dpp `(generalized: ,b-type))
                                                     (tenv-ext e (car b) b-type)))
