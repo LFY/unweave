@@ -22,7 +22,12 @@
                  make-type-scheme
                  type-scheme?
                  type-scheme-vars
-                 type-scheme-body)
+                 type-scheme-body
+                 
+                 make-TVE
+                 unify
+                 tv-chase
+                 tv-sub)
 
 
          (import (rnrs)
@@ -286,6 +291,7 @@
 
   (define (get-type v)
     (cond [(number? v) (if (exact? v) 'Int 'Real)]
+          [(boolean? v) 'Bool]
           [(null? v) `(Lst ,(next-type-variable!))]
           [else 'UNKNOWN]))
 
@@ -376,6 +382,9 @@
                               (unify! Te Tt)
                               (add-type! l Tt)
                               Tt)))]
+          [(factor? ex)
+           (explode-factor ex (lambda (l vs call)
+                                (T `(lambda ,l ,vs ,call) env)))]
           [(lambda? ex) 
            (explode-lambda ex (lambda (l vs call)
                                 (dpp `(lam ,vs ,call ,env))
@@ -402,6 +411,15 @@
                                   
                                   (add-type! l final-type)
                                   final-type)))]
+          [(assert? ex)
+           (explode-assert ex (lambda (l prog constr)
+                                (let* ([res-V (next-type-variable!)]
+                                       [prog-type (T prog env)]
+                                       [constr-type (T constr env)])
+                                  (unify! res-V prog-type)
+                                  (unify! `(-> ,res-V Bool) constr-type)
+                                  (add-type! l `(-> ,res-V (-> ,constr-type ,res-V)))
+                                  res-V)))]
           [(letrec? ex)
            (explode-letrec  ex (lambda (l bs call)
                                  (let* ([local-binding-env
@@ -441,6 +459,9 @@
           [(ref? ex) (let ([res (instantiate (tenv-lkup env (ref->var ex)))])
                        (add-type! (ref->lab ex) res)
                        res)]
+          [(xrp? ex) (explode-xrp ex (lambda (lab scorer name prop-fx-name params)
+                                       (let* ([types (map (lambda (p) (T p env)) params)])
+                                         (car types))))]
           [(const? ex) (let* ([val (const->val ex)]
                               [lab (const->lab ex)]
                               [type (get-type val)])

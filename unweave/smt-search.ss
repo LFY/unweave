@@ -20,6 +20,7 @@
                  (unweave external church-syntax)
 
                  (unweave z3)
+                 (unweave type-inference)
 
                  (unweave util))
 
@@ -36,8 +37,14 @@
          (define (exists-var? v) (and (smt-variable? v) (equal? 'E (first-letter v))))
          (define (score-var? v) (and (smt-variable? v) (equal? 'S (first-letter v))))
 
+         (define (get-return-type f-type)
+           (if (arrow-type? f-type)
+             (get-return-type (arrow-type-res f-type))
+             f-type))
          ;; Our state
-         (define (smt-evaluator ex env addr)
+         (define (smt-evaluator ex env addr label-type-map)
+           (define (lookup-type lab)
+             (cdr (assoc lab label-type-map)))
 
            ;; Predicates on variables
            (define (var? x) (smt-variable? x))
@@ -251,8 +258,14 @@
                (let* ([arg (car args)]
                       [type (hash-table-ref var-type-map arg)])
                  `(= (as nil ,type) ,arg))
+
                `(,f ,@args)))
 
+
+           ;; For polymorphic functions: Since SMT does not support parametric polymorphism, we need to instantiate multiple declarations of a single function.
+           ;; Or just perform unification..
+           ;; (define fvar->poly-instance-table (make-hash-table equal?))
+           
            ;; Evaluator: Like a Scheme interpreter, but contains parameters for whether it is lazy (to enable incremental execution), and tracks the control-environment, which is the current set of control flow choices.
            
            (define (E ex env addr lazy? control-env) 
@@ -292,7 +305,8 @@
                                                   `(closure (lambda ,l ,vs ,c 
                                                               ,@(if (has-type-annotation? ex) 
                                                                   (list (lambda->return-type ex)) 
-                                                                  '())) ,env)))]
+                                                                  '()
+                                                                  )) ,env)))]
                [(factor? ex) (explode-factor ex (lambda (lab formals call) 
                                                   `(factor-closure (lambda ,lab 
                                                                      ,formals
@@ -372,7 +386,28 @@
                                                                                      (if (has-type-annotation? lam)
                                                                                        (let* ([type (lambda->return-type lam)])
                                                                                          (inst-type! Vv (last type))
-                                                                                         (inst-type! Fv type)))
+                                                                                         (inst-type! Fv type))
+                                                                                       (let* ([type-used-here
+                                                                                                (let* ([function-type (cdr (assoc (lambda->lab lam) label-type-map))]
+                                                                                                       [arg-types (map (lambda (v)
+                                                                                                                         (cond [(var? v) (hash-table-ref var-type-map v)]
+                                                                                                                               [(closure? v) (cdr (assoc (lambda->lab (cadr v))
+                                                                                                                                                         label-type-map))]
+                                                                                                                               [else (val->type v)]))
+                                                                                                                       vals)]
+                                                                                                       [constructed-function-type
+                                                                                                         (fold (lambda (next acc)
+                                                                                                                 `(-> ,next
+                                                                                                                      ,acc))
+                                                                                                               'T999RET
+                                                                                                               (reverse arg-types))]
+                                                                                                       [var-assignment (unify function-type constructed-function-type (make-TVE))]
+                                                                                                       [final-type (tv-sub var-assignment function-type)])
+                                                                                                  final-type)])
+
+                                                                                         (inst-type! Fv type-used-here)
+                                                                                         (inst-type! Vv (get-return-type type-used-here))))
+                                                                                       ;;(lookup-type (lambda->lab lam)))
 
                                                                                      (inst-lazy-val! Vv `(,(addr->func-name (list (lambda->lab lam))) ,@vals))
 
@@ -429,7 +464,10 @@
                                               ;; just do a uniform selection for now
                                               (inst-val-type! Xv (uniform-select param-vals))
                                               Xv)))]
-               [(const? ex) (explode-const ex (lambda (lab c) (if (null? c) '() c)))]
+               [(const? ex) (explode-const ex (lambda (lab c) 
+                                                (if (null? c) 
+                                                  '() 
+                                                  c)))]
                [else ex]))
            (let* ([final-var (E ex env addr #f '())])
              ;; (pretty-print `(scoring ,scoring-stmts))
@@ -485,19 +523,24 @@
                   (let* ([var (car var-type)]
                          [type (cdr var-type)])
                     (if (pair? type)
-                      (if (equal? '-> (car type))
-                        (let* ([type-body (cdr type)])
-                          `(declare-fun ,var ,(let* ([arg-type (map fun-arg/val->closure (init type-body))]
-                                                     [unit? (and (null? (car arg-type))
-                                                                 (= (length arg-type) 1))])
-                                                (if unit? '()
-                                                  arg-type))
-                                        ,(fun-arg/val->closure (last type-body))))
+                      (if (arrow-type? type)
+                        (let* ([arg-types (letrec ([loop (lambda (curr acc)
+                                                           (if (arrow-type? curr)
+                                                             (loop (arrow-type-res curr)
+                                                                   (cons (if (arrow-type? (arrow-type-arg curr))
+                                                                           'Clo
+                                                                           (if (member (arrow-type-arg curr) '(() unit))
+                                                                             '()
+                                                                             (arrow-type-arg curr))) acc))
+                                                             (reverse acc)))])
+                                            (loop type '()))]
+                               [res-type (get-return-type type)])
+                          `(declare-fun ,var ,arg-types ,res-type))
                         `(declare-const ,var ,type))
                       `(declare-const ,var ,type))))
                 var-types))
 
-         (define (state->model-finder state extra-stmts)
+         (define (state->nonrec-model-finder state extra-stmts)
            (define (convert-null expr)
              (cond [(null? expr) '()]
                    [(pair? expr) (cond [(and (equal? '= (car expr))
@@ -544,19 +587,19 @@
                   [postprocessed-extra-stmts (convert-null (convert-negative-numbers (convert-boolean-literals extra-stmts)))]
                   [decls (var-type-map->declarations (hash-table->alist (state->var-type-map state)))]
                   ;; [void (pretty-print (hash-table->alist (state->var-type-map state)))]
-                  ;; [no-recursion-constraint (map (lambda (var)
-                  ;;                                 `(assert (= ,var false)))
-                  ;;                               (filter (lambda (var)
-                  ;;                                         (equal? "R" (substring (symbol->string var) 0 1)))
-                  ;;                                       (map car (hash-table->alist (state->var-type-map state)))))]
+                  [no-recursion-constraint (map (lambda (var)
+                                                  `(assert (= ,var false)))
+                                                (filter (lambda (var)
+                                                          (equal? "R" (substring (symbol->string var) 0 1)))
+                                                        (map car (hash-table->alist (state->var-type-map state)))))]
                   [header `((declare-sort Clo 0) ;; an uninterpreted sort for closure values
                             (declare-datatypes (T) ((Lst nil (cons (car T) (cdr Lst))))))]
-                  [z3-stmts `(,@header ,@decls ,@stmts ,@postprocessed-extra-stmts (check-sat) (get-model))])
+                  [z3-stmts `(,@header ,@decls ,@stmts ,@no-recursion-constraint ,@postprocessed-extra-stmts (check-sat) (get-model))])
              
              z3-stmts))
 
          (define (check-state state extra-stmts)
-           (let* ([z3-result (run-z3 (state->model-finder state extra-stmts))]
+           (let* ([z3-result (run-z3 (state->nonrec-model-finder state extra-stmts))]
                   [sat? (equal? 'sat (car z3-result))])
              (if sat?
                (z3-result->assignment (cdr (cadr z3-result)))
@@ -572,21 +615,15 @@
                   [next-state ((state->refresh state))])
              next-state))
 
-         (define (make-nonrec-constr state)
-           (map (lambda (var)
-                  `(assert (= ,var false)))
-                (filter (lambda (var)
-                          (equal? "R" (substring (symbol->string var) 0 1)))
-                        (map car (hash-table->alist (state->var-type-map state))))))
-
-         (define (smt-solve max-depth program constraint)
-           (define body `(assert ,program ,constraint))
-           (define labeled-body (label-transform body))
+         (define (smt-solve max-depth body type-map)
+         ;; (define (smt-solve max-depth program constraint type-map)
+           ;; (define body `(assert ,program ,constraint))
+           ;; (define labeled-body (label-transform body))
            (define labeled-env
              (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e)) (cdr v-e)
                                                   (label-transform (cdr v-e))))) default-env))
 
-           (define initial-state (smt-evaluator labeled-body labeled-env '(top)))
+           (define initial-state (smt-evaluator body labeled-env '(top) type-map))
 
            (define (search max-depth initial-state)
              ;; Interface to state functions
@@ -601,21 +638,14 @@
              (define (expand state)
                (advance-state! state))
 
-             (define (make-ineq-constr prev-sols)
+             (define (find-further-solutions state sols)
                (define (ineq-stmt var val)
                  `(assert (not (= ,var ,val))))
-               (map (lambda (sol)
-                      (let* ([var (car sol)]
-                             [val (cadr sol)])
-                        (ineq-stmt var val)))
-                    prev-sols))
-
-
-             (define (find-further-solutions state sols)
-               (let* ([next-result (state->smt-result state 
-                                                      (append
-                                                        (make-nonrec-constr state)
-                                                        (make-ineq-constr sols)))])
+               (let* ([next-result (state->smt-result state (map (lambda (sol)
+                                                                   (let* ([var (car sol)]
+                                                                          [val (cadr sol)])
+                                                                     (ineq-stmt var val)))
+                                                                 sols))])
                  (if (sat? next-result)
                    (let* ([sol (assoc (car (state->final state)) next-result)])
                      (pretty-print sol)
@@ -626,25 +656,26 @@
              (define (loop curr-depth state)
                (if (> curr-depth max-depth)
                  'unknown
-                 (let* ([solve-result (state->smt-result state (make-nonrec-constr state))])
+                 (let* ([solve-result (state->smt-result state '())])
                    (if (sat? solve-result)
                      state
-                     (let* ([rec-solve-result (state->smt-result state '())])
-                       (if (sat? solve-result)
-                         (loop (+ curr-depth 1)
-                               (expand state))
-                         'no-solutions))))))
+                     ;; (let* ([next-sol (assoc (car (state->final state)) solve-result)])
+                       ;; (cons next-sol solve-result))
+                       ;; state)
+                     ;; (cons next-sol ;; `(assignment: ;; ,solve-result) (find-further-solutions state (list next-sol))))
+                     (loop (+ curr-depth 1)
+                           (expand state))))))
              (loop 0 initial-state))
 
            (search max-depth initial-state))
 
-         (define (run-smt program)
+         (define (run-smt program type-map)
            (define labeled-body (label-transform program))
            (define labeled-env
              (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e)) (cdr v-e)
                                                   (label-transform (cdr v-e))))) default-env))
-           (let* ([state (smt-evaluator labeled-body labeled-env '(top))])
-             (list state (check-state state (make-nonrec-constr state)))))
+           (let* ([state (smt-evaluator labeled-body labeled-env '(top) type-map)])
+             (list state (check-state state '()))))
 
          (define (run-state-with-assignment max-search-depth assignment state)
 
@@ -665,8 +696,7 @@
            (define (loop curr-depth state)
              (if (> curr-depth max-search-depth)
                'unknown
-               (let* ([solve-result (check-state state (append (make-nonrec-constr state) 
-                                                               assignment-constraint))])
+               (let* ([solve-result (check-state state assignment-constraint)])
                  (if (sat? solve-result)
                    (list state solve-result)
                    (loop (+ curr-depth 1)
@@ -821,8 +851,7 @@
              (if (or (>= (length previous-assignments) max-assignments)
                      (> curr-depth max-search-depth))
                (list state solutions)
-               (let* ([solve-result (check-state state (append (make-nonrec-constr state)
-                                                               (map assignment->disequality-constraint previous-assignments)
+               (let* ([solve-result (check-state state (append (map assignment->disequality-constraint previous-assignments)
                                                                extra-constraints))])
                  (if (sat? solve-result)
                    (loop curr-depth 
@@ -901,14 +930,14 @@
            (loop 0 initial-state)
            samples)
 
-         (define (smt-mh-query num-samples max-search-depth program constraint)
-           (define body `(assert ,program ,constraint))
-           (define labeled-body (label-transform body))
+         (define (smt-mh-query num-samples max-search-depth body type-map)
+           ;; (define body `(assert ,program ,constraint))
+           ;; (define labeled-body (label-transform body))
            (define labeled-env
              (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e)) (cdr v-e)
                                                   (label-transform (cdr v-e))))) default-env))
 
-           (define initial-prog-state (smt-solve max-search-depth program constraint))
+           (define initial-prog-state (smt-solve max-search-depth body type-map))
            (define initial-assignment (check-state initial-prog-state '()))
            (define initial-score 0.0)
 
