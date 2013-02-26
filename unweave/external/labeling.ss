@@ -171,7 +171,8 @@
                                                               ,(D call))))]
            [(call? ex) (explode-call ex (lambda (l f vs) `(,(D f) ,@(map D vs))))]
            [(ref? ex) (ref->var ex)]
-           [(xrp? ex) `(quote THIS-SHOULD-NOT-SHOW-UP)]
+           [(xrp? ex) (explode-xrp ex (lambda (l sc smp prop params)
+                                       `(xrp ,@params)))]
            [(xrps? ex) `(quote THIS-SHOULD-NOT-SHOW-UP)]
            [(xrp+init? ex) `(quote THIS-SHOULD-NOT-SHOW-UP)]
            [(factor? ex) (explode-factor ex (lambda (lab formals f) `(factor (lambda ,formals ,(D f)))))]

@@ -1,6 +1,7 @@
 #!r6rs
 (library (unweave invariant-inference)
          (export expr-search
+                 search-and-replace
                  infer-invariants
                  anf)
          (import (rnrs)
@@ -86,6 +87,10 @@
                                                    (if ,(next-lab!) (ref ,(next-lab!) ,cv)
                                                      ,(reset (A t))
                                                      ,(reset (A e)))))))]
+                   [(assert? e) (explode-assert e (lambda (l prog constr)
+                                                    `(assert ,l 
+                                                             ,(reset (A prog))
+                                                             ,(reset (A constr)))))]
                    [(call? e) (explode-call e (lambda (l f as)
                                                 (if (null? as) e
                                                   (let* ([new-f-var (if (ref? f) '() (next-var!))]
@@ -164,6 +169,10 @@
                                                                 #f
                                                                 bs)
                                                           (S c)))))]
+                   [(assert? e) (explode-assert e (lambda (l prog c)
+                                                    (if (found? l)
+                                                      (shift k (k e))
+                                                      (or (S prog) (S c)))))]
                    [(call? e) (explode-call e (lambda (l f as)
                                                 (if (found? l)
                                                   (shift k (k e))
@@ -180,6 +189,18 @@
                                                     #f)))]
                    [else #f]))
            (reset (S e)))
+
+           (define (search-and-replace bindings body)
+             (define (TRE expr)
+               (cond [(pair? expr)
+                      (cons (TRE (car expr))
+                            (TRE (cdr expr)))]
+                     [(symbol? expr)
+                      (if (not (assoc expr bindings)) 
+                        expr
+                        (cdr (assoc expr bindings)))]
+                     [else expr]))
+             (TRE body))
 
          ;; Searches for invariants over EXPR given the types stored in LABEL-TYPE-MAP
          ;; associating points in the program with Hindley-Milner types.
@@ -283,32 +304,36 @@
                                                                                  (env-constr else-condition 
                                                                                              `(<: ,(ret->template e-constr) ,template)))))])
                                               res)))]
-                   [(lambda? e) (explode-lambda e (lambda (l vs c)
-                                                    (let* ([template (get-template! l)]
-                                                           [vs* (if (null? vs) '(())
-                                                                  vs)]
-                                                           [template+vars (add-variables vs* template)]
-                                                           [var+arg-types (letrec ([loop (lambda (vars-left curr-arrow-type)
-                                                                                           (if (null? vars-left) '()
-                                                                                             (cons (cons (car vars-left) 
-                                                                                                         (arrow-type-arg curr-arrow-type))
-                                                                                                   (loop (cdr vars-left) 
-                                                                                                         (arrow-type-res curr-arrow-type)))))])
-                                                                            (loop vs* template+vars))]
-                                                           [next-env (fold (lambda (var-type curr-env)
-                                                                             (ext (car var-type)
-                                                                                  (cdr var-type)
-                                                                                  curr-env))
-                                                                           env
-                                                                           var+arg-types)])
-                                                      (let* ([c-constr (I c next-env)])
-                                                        (cons template+vars (append (ret->constr c-constr)
-                                                                                    (list (env-constr env template+vars)
-                                                                                          (env-constr next-env `(<: ,(ret->template c-constr)
-                                                                                                                    ,(fold (lambda (next acc)
-                                                                                                                             (arrow-type-res acc))
-                                                                                                                           template+vars
-                                                                                                                           vs*))))))))))]
+                   [(or
+                      (lambda? e)
+                      (factor? e))
+                    (explode-lambda e (lambda (l vs c)
+                                        (let* ([template (get-template! l)]
+                                               [vs* (if (null? vs) '(())
+                                                      vs)]
+                                               [template+vars (add-variables vs* template)]
+                                               [var+arg-types (letrec ([loop (lambda (vars-left curr-arrow-type)
+                                                                               (if (null? vars-left) '()
+                                                                                 (cons (cons (car vars-left) 
+                                                                                             (arrow-type-arg curr-arrow-type))
+                                                                                       (loop (cdr vars-left) 
+                                                                                             (arrow-type-res curr-arrow-type)))))])
+                                                                (loop vs* template+vars))]
+                                               [next-env (fold (lambda (var-type curr-env)
+                                                                 (ext (car var-type)
+                                                                      (cdr var-type)
+                                                                      curr-env))
+                                                               env
+                                                               var+arg-types)])
+                                          (let* ([c-constr (I c next-env)])
+                                            (cons template+vars (append (ret->constr c-constr)
+                                                                        (list (env-constr env template+vars)
+                                                                              (env-constr next-env `(<: ,(ret->template c-constr)
+                                                                                                        ,(fold (lambda (next acc)
+                                                                                                                 (arrow-type-res acc))
+                                                                                                               template+vars
+                                                                                                               vs*))))))))))]
+                   [(assert? e) (explode-assert e (lambda (l prog constr) (I prog env)))]
                    [(letrec? e) (explode-letrec e (lambda (l bs c)
                                                     (let* ([template (get-template! l)]
                                                            [other-constraints '()]
@@ -354,6 +379,19 @@
                                  (cons `(rf (V ,(caddr template))
                                             (and (= V ,(ref->var e)))) '())
                                  (cons (lkup (ref->var e) env) '())))]
+                   [(xrp? e) (explode-xrp e (lambda (lab scorer name prop-fx-name params)
+                                               (let* ([template (get-template! lab)]
+                                                      [param-templates+constrs (map (lambda (p) (I p env)) params)]
+                                                      [final-forms (map (lambda (p) (de-label p '())) params)]
+                                                      [to-add (apply append (map cdr param-templates+constrs))])
+                                                 (pretty-print `(final-forms ,final-forms))
+                                                 (cons `(rf (V ,(caddr template))
+                                                            (or ,@(map (lambda (f)
+                                                                         `(= V ,(if (boolean? f)
+                                                                                  (if f 'true 'false)
+                                                                                  f)))
+                                                                       final-forms)))
+                                                       to-add))))]
                    [(const? e) (let* ([template (get-template! (cadr e))])
                                  (cond [(number? (const->val e))
                                         (cons `(rf (V Int) (and (= V ,(const->val e)))) '())]
@@ -366,10 +404,33 @@
                   [constraint-types (get-constraint-types splitted)]
                   [responsible-variables (get-responsible-variables splitted)]
                   [var-type-map (label->var-type-map expr label-type-map)]
-                  [void (pretty-print `(vtm ,var-type-map))]
-                  [initial-sol (make-initial-substitution expr label-type-map splitted)]
-                  [initial-asn (to-assignment initial-sol)])
-             (solve initial-asn initial-sol var-type-map constraint-types responsible-variables)))
+                  [void (pretty-print `(vtm ,label-type-map ,var-type-map))]
+                  [initial-sol (make-initial-substitution expr label-type-map splitted constraint-types)]
+                  [initial-asn (to-assignment initial-sol)]
+                  [solution (solve initial-asn initial-sol var-type-map constraint-types responsible-variables)])
+             `(solution
+                ,solution
+                ,(make-invariant-annotations (alist->hash-table solution)
+                                             templates))))
+
+         (define (make-invariant-annotations assignment templates)
+           (define (annotate template)
+             (cond [(arrow-type? template)
+                    `(-> ,(annotate (arrow-type-arg template))
+                         ,(annotate (arrow-type-res template)))]
+                   [(parametric-type? template)
+                    `(,(car template) ,@(map annotate (cdr template)))]
+                   [(template? template)
+                    `(: ,(annotate (cadr template))
+                        ,@(cddr template))]
+                   [(template-variable? template)
+                    `(and ,@(hash-table-ref assignment template
+                                            (lambda () '(true))))]
+                   [else template]))
+           (map (lambda (x)
+                  (cons (car x)
+                        (annotate (cdr x))))
+                templates))
 
          (define (solve initial-asn initial-sol var-type-map constraint-types responsible-variables)
            (define (all p xs)
@@ -433,7 +494,8 @@
                   [smt-results (map run-z3 progs)])
              (letrec ([loop (lambda (curr-results curr-asn)
                               (pretty-print `(solve-loop ,(map satisfied? curr-results subtype-constr-table) 
-                                                         ,(hash-table->alist curr-asn)))
+                                                         ,(hash-table->alist curr-asn) 
+                                                         ,responsible-variables))
                               (let* ([done? (all (lambda (rb) (satisfied? (car rb) (cadr rb)))
                                                  (zip curr-results subtype-constr-table))])
                                 (if done? (hash-table->alist curr-asn)
@@ -444,13 +506,13 @@
                                                            (zip curr-results subtype-constr-table))]
                                          [raw-constr (convert-raw (list-ref initial-sol next-unsat-idx))]
                                          [vars (list-ref responsible-variables next-unsat-idx)])
-                                    (if (null? vars) 'no-soln
+                                    (if (null? vars) 'no-soln-var-not-found
                                       (let* ([var (car vars)]
                                              [raw-constr-type (list-ref constraint-types next-unsat-idx)]
                                              [weakened-qualifiers (weaken next-asn var (hash-table-ref curr-asn var) raw-constr raw-constr-type)]
                                              [void (hash-table-set! next-asn var weakened-qualifiers)]
                                              [contradict? (not (valid? (re-project-single raw-constr raw-constr-type next-asn)))])
-                                        (if contradict? 'no-soln
+                                        (if contradict? 'no-soln-contradict
                                           (loop 
                                             (re-project next-asn)
                                             next-asn))))))))])
@@ -538,12 +600,11 @@
                                  [type (cdr l-t)]
                                  [my-subexpr (expr-search l orig-expr)])
                             (if (ref? my-subexpr)
-                              (cons (ref->var my-subexpr)
-                                    type)
+                              (cons (ref->var my-subexpr) type)
                               '())))
                         label-type-map)))
 
-         (define (make-initial-substitution expr label-type-map constraints)
+         (define (make-initial-substitution expr label-type-map constraints constraint-types)
 
            (define var-type-map
              (filter (lambda (x) (not (null? x)))
@@ -595,11 +656,6 @@
            (define (process-one-constraint c)
              (define (make-formula env)
                (let* ([variables (map car env)])
-                 ;; (pretty-print `(variables ,variables))
-                 ;; (pretty-print `(var-type-map ,var-type-map))
-                 ;; (pretty-print `(filtered-variables ,(filter (lambda (v) (and (assoc v var-type-map)
-                 ;;                                                              (equal? 'Int (cdr (assoc v var-type-map))))) 
-                 ;;                                             variables)))
                  (possible-primitive-predicates 
                    (cons 'V (filter (lambda (v) (and (assoc v var-type-map)
                                                      (equal? 'Int (cdr (assoc v var-type-map))))) 
@@ -640,7 +696,8 @@
          (define (get-responsible-variables cs)
            (define (variables-of constr)
              (cond [(template? constr)
-                    (if (template-variable? (cadr constr))
+                    (if (and (template-variable? (cadr constr))
+                             (equal? 'Int (caddr constr)))
                       (list (cadr constr))
                       '())]
                    [(substitution? constr)
@@ -677,31 +734,6 @@
            (define (subtype? constr)
              (and (pair? constr)
                   (equal? '<: (car constr))))
-           (define (search-and-replace bindings body)
-             (define (TRE expr)
-               (cond [(pair? expr)
-                      (cons (TRE (car expr))
-                            (TRE (cdr expr)))]
-                     [(symbol? expr)
-                      (if (not (assoc expr bindings)) 
-                        expr
-                        (cdr (assoc expr bindings)))]
-                     [else expr]))
-             (define (TR expr)
-               (cond [(arrow-type? expr)
-                      `(-> ,(TR (arrow-type-arg expr))
-                           ,(TR (arrow-type-res expr)))]
-                     [(template? expr)
-                      `(: ,(TR (cadr expr))
-                          ,(caddr expr)
-                          ,(cadddr expr))]
-                     [(refinement? expr)
-                      `(rf ,(cadr expr)
-                           (and ,@(let* ([old-conjunction (cdr (caddr expr))]
-                                         [new-conjunction (map TR old-conjunction)])
-                                    new-conjunction)))]
-                     [else expr]))
-             (TRE body))
 
            (define (L t)
              (cond [(subtype? t)
@@ -723,7 +755,6 @@
                           ,(caddr t)
                           ,(cadddr t)))]
                    [(substitution? t)
-                    ;; (pretty-print `(before-sub ,t))
                     (let* ([body (L (caddr t))]
                            [bindings (map (lambda (var-val)
                                             (let* ([val (de-label (cadr var-val) '())])
@@ -829,7 +860,9 @@
                    [else e]))
            (let* ([decls (cdr (cadr smt-struct))]
                   [body (cdr (caddr smt-struct))])
-             `(,@decls ,@(map to-smt body) (check-sat) (get-model))))
+             `((declare-sort Clo 0)
+               (declare-datatypes (T) ((Lst nil (cons (car T) (cdr Lst)))))
+               ,@decls ,@(map to-smt body) (check-sat) (get-model))))
 
          (define (weaken sub bad-qualifiers)
            '())

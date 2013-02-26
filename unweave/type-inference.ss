@@ -461,6 +461,7 @@
                        res)]
           [(xrp? ex) (explode-xrp ex (lambda (lab scorer name prop-fx-name params)
                                        (let* ([types (map (lambda (p) (T p env)) params)])
+                                         (add-type! lab (car types))
                                          (car types))))]
           [(const? ex) (let* ([val (const->val ex)]
                               [lab (const->lab ex)]

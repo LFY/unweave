@@ -2,7 +2,8 @@
 (library (unweave smt-search)
          (export smt-solve
                  run-smt
-                 smt-mh-query)
+                 smt-mh-query
+                 smt-calc-prob)
 
          (import (rnrs)
                  (rnrs eval)
@@ -21,6 +22,7 @@
 
                  (unweave z3)
                  (unweave type-inference)
+                 (unweave invariant-inference)
 
                  (unweave util))
 
@@ -42,7 +44,7 @@
              (get-return-type (arrow-type-res f-type))
              f-type))
          ;; Our state
-         (define (smt-evaluator ex env addr label-type-map)
+         (define (smt-evaluator ex env addr label-type-map label-invariant-map)
            (define (lookup-type lab)
              (cdr (assoc lab label-type-map)))
 
@@ -361,7 +363,17 @@
                                                                                                                           Kv)]
                                                                                                                        [else val]))
                                                                                                                vals)]
-                                                                                          [recursion-definition `(assert (=> ,Rv (= ,Vv ,(if (null? vals) Fv `(,Fv ,@converted-vals)))))])
+                                                                                          [recursion-definition `(assert (=> ,Rv (= ,Vv ,(if (null? vals) Fv `(,Fv ,@converted-vals)))))]
+
+                                                                                          [invariant (let* ([lookup-res (assoc (lambda->lab lam) label-invariant-map)])
+                                                                                                       (if lookup-res
+                                                                                                         (cdr lookup-res)
+                                                                                                         '()))])
+
+                                                                                     (if (not (null? invariant)) ;; the invariant is going to be of function type.
+                                                                                       (add-stmt! `(assert ,(search-and-replace `((V . ,Vv)) (cadr (get-return-type invariant)))))
+                                                                                       '())
+
 
                                                                                      (inst-type! Rv 'Bool)
                                                                                      (add-stmt! recursion-condition)
@@ -535,7 +547,11 @@
                                                              (reverse acc)))])
                                             (loop type '()))]
                                [res-type (get-return-type type)])
-                          `(declare-fun ,var ,arg-types ,res-type))
+                          `(declare-fun ,var ,(if (and
+                                                    (= (length arg-types) 1)
+                                                    (null? (car arg-types)))
+                                                '()
+                                                arg-types) ,res-type))
                         `(declare-const ,var ,type))
                       `(declare-const ,var ,type))))
                 var-types))
@@ -594,9 +610,13 @@
                                                         (map car (hash-table->alist (state->var-type-map state)))))]
                   [header `((declare-sort Clo 0) ;; an uninterpreted sort for closure values
                             (declare-datatypes (T) ((Lst nil (cons (car T) (cdr Lst))))))]
-                  [z3-stmts `(,@header ,@decls ,@stmts ,@no-recursion-constraint ,@postprocessed-extra-stmts (check-sat) (get-model))])
-             
+                  [z3-stmts `(,@header ,@decls ,@stmts ,@postprocessed-extra-stmts (check-sat) (get-model))])
              z3-stmts))
+
+         (define (make-nonrec-constraint state)
+           (map (lambda (var) `(assert (= ,var false)))
+                (filter (lambda (var) (equal? "R" (substring (symbol->string var) 0 1)))
+                        (map car (hash-table->alist (state->var-type-map state))))))
 
          (define (check-state state extra-stmts)
            (let* ([z3-result (run-z3 (state->nonrec-model-finder state extra-stmts))]
@@ -614,6 +634,52 @@
                   [void (when (not (null? continue-thunks)) ((car continue-thunks)))]
                   [next-state ((state->refresh state))])
              next-state))
+
+         (define (smt-calc-prob max-depth body type-map invariant-map)
+           (define labeled-env (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e)) (cdr v-e) (label-transform (cdr v-e))))) default-env))
+           (define initial-state (smt-evaluator body labeled-env '(top) type-map invariant-map))
+           (define (search max-depth initial-state)
+             ;; Interface to state functions
+             (define (sat? result)
+               (not (equal? 'unsat result)))
+             (define (fully-expanded? state)
+               ;; condition: no recursion variables
+               (all (lambda (var) (not (equal? "R" (substring (symbol->string var) 0 1))))
+                    (map car (hash-table->alist (state->var-val-map state)))))
+             (define (expand state)
+               (advance-state! state))
+
+             (define (find-further-solutions state sols)
+               (define (ineq-stmt var val)
+                 `(assert (not (= ,var ,val))))
+               (let* ([next-result (check-state state (map (lambda (sol)
+                                                                   (let* ([var (car sol)]
+                                                                          [val (cadr sol)])
+                                                                     (ineq-stmt var val)))
+                                                                 sols))])
+                 (if (sat? next-result)
+                   (let* ([sol (assoc (car (state->final state)) next-result)])
+                     (pretty-print sol)
+                     (cons sol (find-further-solutions state (cons sol sols))))
+                   '())))
+
+
+             (define (loop curr-depth state)
+               (pretty-print `(loop ,curr-depth))
+               (if (> curr-depth max-depth)
+                 'unknown
+                 (let* ([solve-result (check-state state (make-nonrec-constraint state))])
+                   (pretty-print `(solve-result-nonrec ,solve-result))
+                   (if (sat? solve-result)
+                     state
+                     (let* ([rec-solve-result (check-state state '())])
+                       (pretty-print `(solve-result-rec ,rec-solve-result))
+                       (if (sat? rec-solve-result)
+                         (loop (+ curr-depth 1) (expand state))
+                         'unsat))))))
+             (loop 0 initial-state))
+
+           (search max-depth initial-state))
 
          (define (smt-solve max-depth body type-map)
          ;; (define (smt-solve max-depth program constraint type-map)
@@ -651,7 +717,6 @@
                      (pretty-print sol)
                      (cons sol (find-further-solutions state (cons sol sols))))
                    '())))
-
 
              (define (loop curr-depth state)
                (if (> curr-depth max-depth)
