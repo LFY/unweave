@@ -260,9 +260,7 @@
                (let* ([arg (car args)]
                       [type (hash-table-ref var-type-map arg)])
                  `(= (as nil ,type) ,arg))
-
                `(,f ,@args)))
-
 
            ;; For polymorphic functions: Since SMT does not support parametric polymorphism, we need to instantiate multiple declarations of a single function.
            ;; Or just perform unification..
@@ -292,23 +290,23 @@
                                             (inst-type! Rv (if (contains-type-parameter? (get-type Tv))
                                                              (get-type Ev)
                                                              (get-type Tv)))
-
-                                            (if (not lazy?)
-                                              (inst-val! Rv (if eval-T-lazily? (get-val Ev) (get-val Tv))))
+                                            (if (not lazy?) (inst-val! Rv (if eval-T-lazily? (get-val Ev) (get-val Tv))))
                                             Rv)))]
                [(assert? ex) (explode-assert ex (lambda (l p q)
                                                   (let* ([Av (next-assert addr)]
                                                          [Pv (E p env (cons l addr) lazy? control-env)]
                                                          [Qv (E `(call ,l ,q ,Pv) env (cons 'q (cons l addr)) lazy? control-env)])
                                                     (inst-type! Av 'Bool)
-                                                    (add-stmt!  `(assert (and (= ,Av ,Qv) (= ,Av #t))))
+                                                    (add-stmt!  `(assert (and (= ,Av ,Qv))))
+                                                    (inst-val! Av (get-val Qv))
                                                     Pv)))]
                [(lambda? ex) (explode-lambda ex (lambda (l vs c) 
                                                   `(closure (lambda ,l ,vs ,c 
                                                               ,@(if (has-type-annotation? ex) 
                                                                   (list (lambda->return-type ex)) 
                                                                   '()
-                                                                  )) ,env)))]
+                                                                  )) 
+                                                            ,env)))]
                [(factor? ex) (explode-factor ex (lambda (lab formals call) 
                                                   `(factor-closure (lambda ,lab 
                                                                      ,formals
@@ -597,25 +595,29 @@
                                      `(- ,(- expr))
                                      expr)]
                    [else expr]))
-           (let* (
-                  ;;[void (for-each pretty-print (state->stmts state))]
-                  [stmts (convert-null (convert-negative-numbers (convert-boolean-literals (state->stmts state))))]
+           (let* ([stmts (convert-null (convert-negative-numbers (convert-boolean-literals (state->stmts state))))]
                   [postprocessed-extra-stmts (convert-null (convert-negative-numbers (convert-boolean-literals extra-stmts)))]
                   [decls (var-type-map->declarations (hash-table->alist (state->var-type-map state)))]
-                  ;; [void (pretty-print (hash-table->alist (state->var-type-map state)))]
-                  [no-recursion-constraint (map (lambda (var)
-                                                  `(assert (= ,var false)))
-                                                (filter (lambda (var)
-                                                          (equal? "R" (substring (symbol->string var) 0 1)))
-                                                        (map car (hash-table->alist (state->var-type-map state)))))]
-                  [header `((declare-sort Clo 0) ;; an uninterpreted sort for closure values
-                            (declare-datatypes (T) ((Lst nil (cons (car T) (cdr Lst))))))]
+                  [header `((declare-sort Clo 0)
+                            (declare-datatypes 
+                              (T) 
+                              ((Lst nil (cons (car T) (cdr Lst))))))]
                   [z3-stmts `(,@header ,@decls ,@stmts ,@postprocessed-extra-stmts (check-sat) (get-model))])
              z3-stmts))
 
          (define (make-nonrec-constraint state)
            (map (lambda (var) `(assert (= ,var false)))
                 (filter (lambda (var) (equal? "R" (substring (symbol->string var) 0 1)))
+                        (map car (hash-table->alist (state->var-type-map state))))))
+
+         (define (make-rec-constraint state)
+           (map (lambda (var) `(assert (= ,var true)))
+                (filter (lambda (var) (equal? "R" (substring (symbol->string var) 0 1)))
+                        (map car (hash-table->alist (state->var-type-map state))))))
+
+         (define (make-assertion-constraint tf state)
+           (map (lambda (var) `(assert (= ,var ,tf)))
+                (filter (lambda (var) (equal? "A" (substring (symbol->string var) 0 1)))
                         (map car (hash-table->alist (state->var-type-map state))))))
 
          (define (check-state state extra-stmts)
@@ -638,6 +640,7 @@
          (define (smt-calc-prob max-depth body type-map invariant-map)
            (define labeled-env (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e)) (cdr v-e) (label-transform (cdr v-e))))) default-env))
            (define initial-state (smt-evaluator body labeled-env '(top) type-map invariant-map))
+
            (define (search max-depth initial-state)
              ;; Interface to state functions
              (define (sat? result)
@@ -663,20 +666,31 @@
                      (cons sol (find-further-solutions state (cons sol sols))))
                    '())))
 
-
              (define (loop curr-depth state)
                (pretty-print `(loop ,curr-depth))
                (if (> curr-depth max-depth)
                  'unknown
-                 (let* ([solve-result (check-state state (make-nonrec-constraint state))])
+                 (let* ([solve-result (check-state state (append (make-nonrec-constraint state) (make-assertion-constraint 'true state)))])
                    (pretty-print `(solve-result-nonrec ,solve-result))
                    (if (sat? solve-result)
                      state
-                     (let* ([rec-solve-result (check-state state '())])
-                       (pretty-print `(solve-result-rec ,rec-solve-result))
-                       (if (sat? rec-solve-result)
-                         (loop (+ curr-depth 1) (expand state))
-                         'unsat))))))
+                     (let* ([validity-check (check-state state (append (make-rec-constraint state) (make-assertion-constraint 'false state)))])
+                       (if (not (sat? validity-check))
+                         (let* ([void (pretty-print 'valid-state)]
+                                [assignment (check-state state (append (make-rec-constraint state) (make-assertion-constraint 'true state)))]
+                                [scores (filter (lambda (var-val) 
+                                                  (equal? "S" (substring (symbol->string (car var-val)) 
+                                                                         0 1)))
+                                                assignment)]
+                                [total-prob (apply + (map cadr scores))])
+                           (pretty-print scores)
+                           (pretty-print `(probability: ,(exp total-prob)))
+                           state)
+                         (let* ([unsat-check (check-state state (make-assertion-constraint 'true state))])
+                           (pretty-print `(solve-result-rec ,validity-check ,unsat-check))
+                           (if (sat? unsat-check)
+                             (loop (+ curr-depth 1) (expand state))
+                             'unsat))))))))
              (loop 0 initial-state))
 
            (search max-depth initial-state))
@@ -800,7 +814,6 @@
                     (exists-var? (cadr body)))))
            (define (assert->exists-implication assert)
              (cadr assert))
-
            (map exists-implication->xrp-domain
                 (map assert->exists-implication 
                      (filter exists-implication? formula))))
@@ -880,7 +893,7 @@
                                                        prog-state)
 
            (define max-assignments 10)
-           (define skip-probability 0.5)
+           (define skip-probability 0.2)
 
            (define (sat? result)
              (not (equal? 'unsat result)))
@@ -934,18 +947,13 @@
              (list (car final-state-solutions)
                    (uniform-select (cadr final-state-solutions)))))
 
-
          (define (slice-proposal max-search-depth mcmc-state)
-
            (define (slice-constraint mcmc-state threshold)
              (let* ([score-vars (map car (filter (lambda (a) (score-var? (car a)))
                                                  (mcmc-state->assignment mcmc-state)))])
                `(assert (<= ,threshold (+ ,@score-vars)))))
-
-
            (define (uniform a b)
              (+ a (* (random-real) (- b a))))
-
            (let* ([current-score (mcmc-state->score mcmc-state)]
                   [next-slice-threshold (log (uniform 0 (exp current-score)))]
                   [next-slice-constraint (slice-constraint mcmc-state next-slice-threshold)]
@@ -955,8 +963,6 @@
              (make-mcmc-state (car next-state+assignment)
                               (cadr next-state+assignment)
                               (assignment->score (cadr next-state+assignment)))))
-             
-                  
 
          (define (smt-mh-loop num-iter max-search-depth initial-state)
            (define samples '())
@@ -965,16 +971,6 @@
              (let* ([sample-val (cadr (assoc (car (state->final (mcmc-state->prog-state mcmc-state)))
                                              (mcmc-state->assignment mcmc-state)))]
                     [final-sample-val sample-val])
-                    
-                    ;; (if (pair? sample-val)
-                    ;;                     (eval `(let ()
-                    ;;                              (define nil '())
-                    ;;                              (define Int '())
-                    ;;                              (define (Lst . xs) '())
-                    ;;                              (define (as . xs) (car xs))
-                    ;;                              (define answer ,sample-val)
-                    ;;                              answer)
-                    ;;                           (environment '(rnrs))))])
                (pretty-print final-sample-val)
                (set! samples (cons final-sample-val samples))))
 
@@ -983,7 +979,6 @@
              (accumulate-sample! curr-state)
              (if (< iter num-iter)
                (let* ([score-before (mcmc-state->score curr-state)]
-                      ;; [next-state (proposal max-search-depth curr-state)]
                       [next-state (slice-proposal max-search-depth curr-state)]
                       [score-after (mcmc-state->score next-state)]
                       [accept? (< (log (random-real)) (- score-after score-before))])
