@@ -31,10 +31,7 @@
          (define (first-letter x)
            (string->symbol (substring (symbol->string x) 0 1)))
 
-         (define (smt-variable? v) (and (symbol? v) 
-                               (member (first-letter v)
-                                       '(C V E A X Y S))))
-
+         (define (smt-variable? v) (and (symbol? v) (member (first-letter v) '(C V E A X Y S)))) 
          (define (control-var? v) (and (smt-variable? v) (equal? 'C (first-letter v))))
          (define (exists-var? v) (and (smt-variable? v) (equal? 'E (first-letter v))))
          (define (score-var? v) (and (smt-variable? v) (equal? 'S (first-letter v))))
@@ -260,7 +257,17 @@
                (let* ([arg (car args)]
                       [type (hash-table-ref var-type-map arg)])
                  `(= (as nil ,type) ,arg))
-               `(,f ,@args)))
+               (if (equal? 'equal? f)
+                 `(= ,@args)
+                 `(,f ,@args))))
+
+           (define recur-live (make-hash-table equal?))
+           (define recur-thunks (make-hash-table equal?))
+           (define recur-deletions (make-hash-table equal?))
+
+           (define live-recurs '())
+           (define (add-live-recur! v) (set! live-recurs (cons v live-recurs)))
+           (define (remove-live-recur! v) (set! live-recurs (filter (lambda (u) (not (equal? v u))) live-recurs)))
 
            ;; For polymorphic functions: Since SMT does not support parametric polymorphism, we need to instantiate multiple declarations of a single function.
            ;; Or just perform unification..
@@ -344,11 +351,14 @@
                                                                                                             env2 env)])
                                                                                  (if lazy?
                                                                                    ;; save a thunk that performs the next step of computation.
-                                                                                   (let* ([res-thunk (lambda () 
+                                                                                   (let* (
+                                                                                          [Rv (next-recursion-flag (cons l addr))]
+                                                                                          [res-thunk (lambda () 
+                                                                                                       (hash-table-set! recur-live Rv #f)
                                                                                                        (let* ([next-res (E (lambda->call lam) combined-env (cons l addr) #t control-env)])
                                                                                                          (add-stmt! `(assert (= ,Vv ,next-res)))
                                                                                                          next-res))]
-                                                                                          [Rv (next-recursion-flag (cons l addr))]
+                                                                                          [void (hash-table-set! recur-thunks Rv res-thunk)]
                                                                                           [Fv (new-call-name (cons l addr))]
                                                                                           [recursion-condition `(assert (= ,Rv ,(control-env->constraint control-env)))]  
 
@@ -374,8 +384,15 @@
 
 
                                                                                      (inst-type! Rv 'Bool)
+                                                                                     (add-live-recur! Rv)
                                                                                      (add-stmt! recursion-condition)
                                                                                      (add-stmt! recursion-definition)
+
+                                                                                     (hash-table-set! recur-live Rv #t)
+                                                                                     (hash-table-set! recur-deletions Rv
+                                                                                                      (lambda ()
+                                                                                                        (set-car! (cdr recursion-condition) #t)
+                                                                                                        (set-car! (cdr recursion-definition) #t)))
 
                                                                                      (set! continue-thunks (cons res-thunk continue-thunks))
                                                                                      (set! deletion-thunks
@@ -489,6 +506,7 @@
                                                    continue-thunks 
                                                    deletion-thunks 
                                                    (append stmts scoring-stmts)
+                                                   (list recur-live recur-thunks recur-deletions)
                                                    refresh-state))])
                (refresh-state))))
 
@@ -500,8 +518,9 @@
                    continue-thunks 
                    deletion-thunks 
                    stmts
+                   live-recurs
                    refresh-state)
-           `(,final ,var-val-map ,var-type-map ,lazy-map ,continue-thunks ,deletion-thunks ,stmts ,refresh-state))
+           `(,final ,var-val-map ,var-type-map ,lazy-map ,continue-thunks ,deletion-thunks ,stmts ,live-recurs ,refresh-state))
 
          (define (make-list-ref n)
            (lambda (xs) (list-ref xs n)))
@@ -517,7 +536,8 @@
          (define state->deletion-thunks (make-list-ref 5))
          (define set-state-deletion-thunks! (lambda (state cts) (set-list-elt! state cts 5)))
          (define state->stmts (make-list-ref 6))
-         (define state->refresh (make-list-ref 7))
+         (define state->live-recurs (make-list-ref 7))
+         (define state->refresh (make-list-ref 8))
 
          (define (var-val-map->assignment-constraints var-vals)
            (map (lambda (var-val)
@@ -627,8 +647,22 @@
                (z3-result->assignment (cdr (cadr z3-result)))
                'unsat)))
 
-         ;; next step: advance the state
+         (define (get-live-recursion-variables state)
+           (let* ([live-table (hash-table->alist (car (state->live-recurs state)))])
+             (map car (filter cdr live-table))))
 
+         (define (advance-state-along! rv state)
+           (let* ([live-recurs (state->live-recurs state)]
+                  [live-table (car live-recurs)]
+                  [continue-table (cadr live-recurs)]
+                  [deletion-table (caddr live-recurs)]
+                  [live? (hash-table-ref live-table rv (lambda () #f))])
+             (if live?
+               (let* ([void ((hash-table-ref deletion-table rv))]
+                      [void ((hash-table-ref continue-table rv))])
+                 ((state->refresh state)))
+               state)))
+                      
          (define (advance-state! state)
            (let* ([deletion-thunks (state->deletion-thunks state)]
                   [continue-thunks (state->continue-thunks state)]
@@ -638,6 +672,9 @@
              next-state))
 
          (define (smt-calc-prob max-depth body type-map invariant-map)
+
+           (define total-prob 0.0)
+
            (define labeled-env (map (lambda (v-e) `(,(car v-e) . ,(if (procedure? (cdr v-e)) (cdr v-e) (label-transform (cdr v-e))))) default-env))
            (define initial-state (smt-evaluator body labeled-env '(top) type-map invariant-map))
 
@@ -652,46 +689,121 @@
              (define (expand state)
                (advance-state! state))
 
-             (define (find-further-solutions state sols)
-               (define (ineq-stmt var val)
-                 `(assert (not (= ,var ,val))))
-               (let* ([next-result (check-state state (map (lambda (sol)
-                                                                   (let* ([var (car sol)]
-                                                                          [val (cadr sol)])
-                                                                     (ineq-stmt var val)))
-                                                                 sols))])
-                 (if (sat? next-result)
-                   (let* ([sol (assoc (car (state->final state)) next-result)])
-                     (pretty-print sol)
-                     (cons sol (find-further-solutions state (cons sol sols))))
-                   '())))
+             ;; inequality: over current set of choices, or the existence thereof.
+             (define (make-ineq-sol asn)
+               (let* ([res `(assert 
+                              (and 
+                                (or ,@(map (lambda (sol)
+                                             (let* ([var (car sol)]
+                                                    [val (cadr sol)])
+                                               `(not (= ,var ,val))))
+                                           (filter (lambda (var-val)
+                                                     (equal? "X" (substring (symbol->string (car var-val))
+                                                                            0 1)))
+                                                   asn)))
+                                (or ,@(map (lambda (sol)
+                                             (let* ([var (car sol)]
+                                                    [val (cadr sol)])
+                                               `(not (= ,var ,val))))
+                                           (filter (lambda (var-val)
+                                                     (equal? "E" (substring (symbol->string (car var-val))
+                                                                            0 1)))
+                                                   asn)))
 
-             (define (loop curr-depth state)
-               (pretty-print `(loop ,curr-depth))
+                                ))])
+                 res))
+
+             (define (get-assignment-score assignment)
+               (let* ([scores (filter (lambda (var-val) 
+                                        (equal? "S" (substring (symbol->string (car var-val)) 
+                                                               0 1)))
+                                      assignment)])
+                 (apply + (map cadr scores))))
+
+             (define (loop curr-depth state must-check do-not-check sols postprocessed-sols)
+               (pretty-print `(loop depth ,curr-depth solutions ,(length sols)))
                (if (> curr-depth max-depth)
-                 'unknown
-                 (let* ([solve-result (check-state state (append (make-nonrec-constraint state) (make-assertion-constraint 'true state)))])
-                   (pretty-print `(solve-result-nonrec ,solve-result))
+                 `(passed-max-depth-stop ,postprocessed-sols)
+                 (let* ([solve-result (check-state state (append (map make-ineq-sol sols)
+                                                                 (make-nonrec-constraint state) 
+                                                                 (make-assertion-constraint 'true state)))])
                    (if (sat? solve-result)
-                     state
-                     (let* ([validity-check (check-state state (append (make-rec-constraint state) (make-assertion-constraint 'false state)))])
-                       (if (not (sat? validity-check))
-                         (let* ([void (pretty-print 'valid-state)]
-                                [assignment (check-state state (append (make-rec-constraint state) (make-assertion-constraint 'true state)))]
-                                [scores (filter (lambda (var-val) 
-                                                  (equal? "S" (substring (symbol->string (car var-val)) 
-                                                                         0 1)))
-                                                assignment)]
-                                [total-prob (apply + (map cadr scores))])
-                           (pretty-print scores)
-                           (pretty-print `(probability: ,(exp total-prob)))
-                           state)
-                         (let* ([unsat-check (check-state state (make-assertion-constraint 'true state))])
-                           (pretty-print `(solve-result-rec ,validity-check ,unsat-check))
-                           (if (sat? unsat-check)
-                             (loop (+ curr-depth 1) (expand state))
-                             'unsat))))))))
-             (loop 0 initial-state))
+                     (let* ([scores (filter (lambda (var-val)
+                                              (equal? "S" (substring (symbol->string (car var-val))
+                                                                     0 1)))
+                                            solve-result)]
+                            [total-prob (apply + (map cadr scores))])
+                       (loop curr-depth state must-check do-not-check (cons solve-result sols) (cons (cons
+                                                                                          (cdr (assoc (car (state->final state)) solve-result))
+                                                                                          total-prob)
+                                                                                        postprocessed-sols)))
+
+                     ;; for each live recursion variable, check for validity, unsatisfiability, or somewhere in between.
+                     ;; then advance the state along the parts "in-between"
+                     (let* ([recursion-variables (filter (lambda (v) (not (member v do-not-check))) (get-live-recursion-variables state))]
+                            [valid-results (map (lambda (v) (check-state state (append (list `(assert (= ,v true)))
+                                                                                       (make-assertion-constraint 'false state))))
+                                                recursion-variables)]
+                            [valid-variables (map cdr (filter car (map (lambda (r v) (cons (not (sat? r)) v)) valid-results recursion-variables)))]
+                            [valid-scores (map (lambda (v)
+                                                 (get-assignment-score 
+                                                   (check-state state 
+                                                                (append 
+                                                                  (list `(assert (= ,v true))) 
+                                                                  (make-assertion-constraint 'true state)))))
+                                               valid-variables)]
+                            [valid-postprocessed (map (lambda (s) `(rec . ,s))
+                                                      valid-scores)]
+                            [unsat-results (map (lambda (v) (check-state state (append (list `(assert (= ,v true)))
+                                                                                       (make-assertion-constraint 'true state))))
+                                                recursion-variables)]
+                            [unsat-variables (map cdr (filter car (map (lambda (r v) (cons (not (sat? r)) v)) unsat-results recursion-variables)))]
+                            [to-check (filter (lambda (v)
+                                                (and (not (member v valid-variables))
+                                                     (not (member v unsat-variables))))
+                                              recursion-variables)])
+                       (if (and (null? must-check) (null? to-check))
+                         `(exhausted ,(append valid-postprocessed postprocessed-sols))
+                         (if (null? to-check)
+                           (loop (+ 1 curr-depth) 
+                                 (advance-state-along! (car must-check) state) 
+                                 (cdr must-check) 
+                                 (append valid-variables unsat-variables do-not-check) 
+                                 sols 
+                                 (append valid-postprocessed postprocessed-sols))
+                           (loop (+ 1 curr-depth) 
+                                 (advance-state-along! (car to-check) state) 
+                                 (append (cdr to-check) must-check) 
+                                 (append valid-variables unsat-variables do-not-check) 
+                                 sols 
+                                 (append valid-postprocessed postprocessed-sols))))))
+                    ;;    (loop (+ 1 curr-depth) (advance-along (car to-check)) (append (cdr to-check) must-checl)
+                    ;;    (letrec ([loop2 (lambda (rest)
+                    ;;                      (let* ([v (car rest)])
+                    ;;                        (
+
+
+                    ;;    
+                    ;;  
+                    ;;  (loop (+ curr-depth 1) (expand state) sols postprocessed-sols)
+                     ;; (let* ([validity-check (check-state state (append (make-rec-constraint state) (make-assertion-constraint 'false state)))])
+                     ;;   (if (not (sat? validity-check))
+                     ;;     (let* ([void (pretty-print `(valid-check ,validity-check))]
+                     ;;            [assignment (check-state state (append (make-rec-constraint state) (make-assertion-constraint 'true state)))]
+                     ;;            [scores (filter (lambda (var-val) 
+                     ;;                              (equal? "S" (substring (symbol->string (car var-val)) 
+                     ;;                                                     0 1)))
+                     ;;                            assignment)]
+                     ;;            [total-prob (apply + (map cadr scores))])
+                     ;;       `(valid-stop ,total-prob ,postprocessed-sols))
+                     ;;     (let* ([unsat-check (check-state state (append (make-rec-constraint state) (make-assertion-constraint 'true state)))])
+                     ;;       (pretty-print `(solve-result-rec ,validity-check ,unsat-check))
+                     ;;       (if (sat? unsat-check)
+                     ;;         (loop (+ curr-depth 1) (expand state) sols postprocessed-sols)
+                     ;;         `(unsat-stop ,postprocessed-sols)))))
+                     
+                     )))
+             (loop 0 initial-state '() '() '() '()))
 
            (search max-depth initial-state))
 
