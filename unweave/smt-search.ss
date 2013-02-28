@@ -671,6 +671,21 @@
                   [next-state ((state->refresh state))])
              next-state))
 
+         (define (exist-var->xrp-var v)
+           (let* ([var-idx (substring
+                             (symbol->string v)
+                             1 (string-length (symbol->string v)))])
+             (string->symbol
+               (string-append "X" var-idx))))
+
+         (define (vars-by-type type asn)
+           (define (filter-by pre)
+             (let* ([pre-str (symbol->string pre)])
+             (filter (lambda (var-val)
+                       (equal? pre-str (substring (symbol->string (car var-val)) 0 1)))
+                     asn)))
+           (filter-by type))
+
          (define (smt-calc-prob max-depth body type-map invariant-map)
 
            (define total-prob 0.0)
@@ -691,26 +706,18 @@
 
              ;; inequality: over current set of choices, or the existence thereof.
              (define (make-ineq-sol asn)
-               (let* ([res `(assert 
-                              (and 
-                                (or ,@(map (lambda (sol)
-                                             (let* ([var (car sol)]
-                                                    [val (cadr sol)])
-                                               `(not (= ,var ,val))))
-                                           (filter (lambda (var-val)
-                                                     (equal? "X" (substring (symbol->string (car var-val))
-                                                                            0 1)))
-                                                   asn)))
-                                (or ,@(map (lambda (sol)
-                                             (let* ([var (car sol)]
-                                                    [val (cadr sol)])
-                                               `(not (= ,var ,val))))
-                                           (filter (lambda (var-val)
-                                                     (equal? "E" (substring (symbol->string (car var-val))
-                                                                            0 1)))
-                                                   asn)))
+               (define (eq-to-prev sol) `(= ,(car sol) ,(cadr sol)))
+               (define (ineq-to-prev sol) `(not (= ,(car sol) ,(cadr sol))))
+               (define (filter-true asn) (filter (lambda (sol) (cadr sol)) asn))
+               (define (filter-false asn) (filter (lambda (sol) (not (cadr sol))) asn))
 
-                                ))])
+               (let* ([res `(assert 
+                              (or 
+                                (and 
+                                  ,@(map eq-to-prev (vars-by-type 'E asn))
+                                  (not (and ,@(map eq-to-prev (map (lambda (v) (assoc v asn)) (map exist-var->xrp-var (map car (filter-true (vars-by-type 'E asn))))))))
+                                  (and ,@(map eq-to-prev (map (lambda (v) (assoc v asn)) (map exist-var->xrp-var (map car (filter-false (vars-by-type 'E asn))))))))
+                                (not (and ,@(map eq-to-prev (vars-by-type 'E asn))))))])
                  res))
 
              (define (get-assignment-score assignment)
@@ -934,12 +941,7 @@
          ;; Constrains all other currently-existing variables to be the same.
          (define (perturb-assignment assignment xrp-domains)
 
-           (define (exist-var->xrp-var v)
-             (let* ([var-idx (substring
-                               (symbol->string v)
-                               1 (string-length (symbol->string v)))])
-               (string->symbol
-                 (string-append "X" var-idx))))
+           
 
            (let* ([existence-variables (filter cadr (filter (lambda (a) (exists-var? (car a))) assignment))]
                   [existing-xrps (map exist-var->xrp-var (map car existence-variables))]
