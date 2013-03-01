@@ -15,38 +15,24 @@
 
 ;; Geometric
 
-;; (define expr2
-;;   '(letrec ([sum-list (lambda (xs)
-;;                         (if (null? xs) 0
-;;                           (+ (car xs) 
-;;                              (sum-list (cdr xs)))))])
-;;      (sum-list (cons 1 (cons 2 (cons 3 '()))))))
-              
-
-'(define expr2
-  '(assert
-     (letrec ([geometric (lambda ()
-                           (if (xrp 1 1 1 #t #f)
-                             '() 
-                             (cons (+ (xrp 1 1 1 0 1)
-                                      (xrp 1 1 1 0 1))
-                                   (geometric))))])
-       (geometric))
-     (lambda (n) (equal? n (cons 1 (cons 1 (cons 1 (cons 1 '()))))))))
-
 (define expr2
   '(assert
-     (letrec ([geometric (lambda ()
-                           (if (xrp 1 1 1 #t #f)
-                             '() 
-                             (if (xrp 1 1 1 #t #f)
-                               (cons 1 (geometric))
-                               (cons 1 (cons 1 (geometric))))))])
-       (geometric))
-     (lambda (n) (equal? n (cons 1 (cons 1 (cons 1 (cons 1 '()))))))))
-
-(define transformed-expr
-  (anf (label-transform expr2)))
+     (letrec ([list-map (lambda (f xs2)
+                          (if (null? xs2) '()
+                            (cons (f (car xs2))
+                                  (list-map f (cdr xs2)))))]
+              [sum-list (lambda (xs)
+                          (if (null? xs) 0
+                            (+ (car xs) 
+                               (sum-list (cdr xs)))))])
+       (sum-list (list-map (lambda (x) (+ x 1)) 
+                           (cons (xrp 1 1 1 1 2 3 4)
+                                 (cons (xrp 1 1 1 1 2 3 4)
+                                       (cons (xrp 1 1 1 1 2 3 4) 
+                                             '()))))))
+     (lambda (n) (< n 10))))
+              
+(define transformed-expr (anf (label-transform expr2)))
 
 (pretty-print transformed-expr)
 
@@ -108,6 +94,4 @@
 
 (define label->invariant-map (caddr inferred-invariants))
 
-(define label->invariant-map '())
-
-(pretty-print (smt-calc-prob 100 transformed-expr (cadr inferred-types) label->invariant-map))
+(pretty-print (smt-calc-prob 100 transformed-expr (cadr inferred-types) '()))
