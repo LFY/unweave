@@ -51,7 +51,7 @@
         
 ;; (define (dpp x) '())
 
-(define DEBUG #t)
+(define DEBUG #f)
 (define (dpp x) 
   (if DEBUG (pretty-print x)))
 
@@ -221,7 +221,11 @@
 
 ;; Hack to clean up mistakes
 (define (clean-types expr start-tenv label-type-map)
-  (define (more-specific a b) (if (type-variable? a) b a))
+  (define (more-specific a b) 
+    (if (and (type-variable? a) 
+             (type-variable? b))
+      b
+      (if (type-variable? b) a b)))
   (define label-type-table (alist->hash-table label-type-map))
   (define (C ex tenv)
     (cond [(if? ex) (explode-if ex (lambda (l c t e)
@@ -239,16 +243,24 @@
                                                                                  (tenv-ext e v c*)))
                                                                              tenv
                                                                              bs)])
-                                               (C c local-binding-env))))]
+                                               (C c local-binding-env)
+                                               (hash-table-ref label-type-table l))))]
           [(call? ex) (explode-call ex (lambda (l f vs) 
                                          (C f tenv)
                                          (for-each (lambda (v) (C v tenv)) vs)
                                          (hash-table-ref label-type-table l)))]
-          [(ref? ex) (let* ([from-env (tenv-lkup tenv (ref->var ex))]
+          [(ref? ex) (let* ([from-env (let* ([res (tenv-lkup tenv (ref->var ex))])
+                                        (if (type-scheme? res) 
+                                          (type-scheme-body res)
+                                          res))]
                             [from-table (hash-table-ref label-type-table (ref->lab ex))]
                             [res (more-specific from-env from-table)])
                        (hash-table-set! label-type-table (ref->lab ex) res)
-                       res)]
+                       ;; (hash-table-ref label-type-table (ref->lab ex))
+                       ;; res
+                       
+                       res
+                       )]
           [(const? ex) (hash-table-ref label-type-table (const->lab ex))]
           [else ex]))
   (begin

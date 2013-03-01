@@ -28,8 +28,7 @@
 
          ;; Predicates for variables
         
-         (define (first-letter x)
-           (string->symbol (substring (symbol->string x) 0 1)))
+         (define (first-letter x) (string->symbol (substring (symbol->string x) 0 1)))
 
          (define (smt-variable? v) (and (symbol? v) (member (first-letter v) '(C V E A X Y S)))) 
          (define (control-var? v) (and (smt-variable? v) (equal? 'C (first-letter v))))
@@ -50,8 +49,7 @@
            (define (rv? v) (and (smt-variable? v) (equal? 'X (first-letter v))))
 
            ;; Parametric types
-           (define (type-parameter? s)
-             (member s '(A B C D E F G H I J K L M)))
+           (define (type-parameter? s) (member s '(A B C D E F G H I J K L M)))
 
            (define (contains-type-parameter? t)
              (if (null? t) #f
@@ -351,8 +349,7 @@
                                                                                                             env2 env)])
                                                                                  (if lazy?
                                                                                    ;; save a thunk that performs the next step of computation.
-                                                                                   (let* (
-                                                                                          [Rv (next-recursion-flag (cons l addr))]
+                                                                                   (let* ([Rv (next-recursion-flag (cons l addr))]
                                                                                           [res-thunk (lambda () 
                                                                                                        (hash-table-set! recur-live Rv #f)
                                                                                                        (let* ([next-res (E (lambda->call lam) combined-env (cons l addr) #t control-env)])
@@ -375,11 +372,22 @@
 
                                                                                           [invariant (let* ([lookup-res (assoc (lambda->lab lam) label-invariant-map)])
                                                                                                        (if lookup-res
-                                                                                                         (cdr lookup-res)
-                                                                                                         '()))])
-
+                                                                                                         (let* ([inv-body (cdr lookup-res)])
+                                                                                                           (if (template? inv-body)
+                                                                                                             (if (equal? inv-body '(and)) 'true inv-body)
+                                                                                                             '()))
+                                                                                                         '()))]
+                                                                                          [invariant-vars (letrec ([is-var? (lambda (e) (and (symbol? e)
+                                                                                                                                             (assoc e env)))]
+                                                                                                                   [get-vars (lambda (e)
+                                                                                                                     (cond [(pair? e) (apply append (map get-vars (cdr e)))] 
+                                                                                                                           [(symbol? e) (if (is-var? e) (list e) '())]
+                                                                                                                           [else '()]))])
+                                                                                                            (get-vars invariant))])
                                                                                      (if (not (null? invariant)) ;; the invariant is going to be of function type.
-                                                                                       (add-stmt! `(assert ,(search-and-replace `((V . ,Vv)) (cadr (get-return-type invariant)))))
+                                                                                       (add-stmt! `(assert ,(search-and-replace `((V . ,Vv) 
+                                                                                                                                  ,@(map (lambda (v) `(v . ,(lookup env v))) invariant-vars)) 
+                                                                                                                                (cadr (get-return-type invariant)))))
                                                                                        '())
 
 
@@ -711,13 +719,24 @@
                (define (filter-true asn) (filter (lambda (sol) (cadr sol)) asn))
                (define (filter-false asn) (filter (lambda (sol) (not (cadr sol))) asn))
 
-               (let* ([res `(assert 
-                              (or 
-                                (and 
-                                  ,@(map eq-to-prev (vars-by-type 'E asn))
-                                  (not (and ,@(map eq-to-prev (map (lambda (v) (assoc v asn)) (map exist-var->xrp-var (map car (filter-true (vars-by-type 'E asn))))))))
-                                  (and ,@(map eq-to-prev (map (lambda (v) (assoc v asn)) (map exist-var->xrp-var (map car (filter-false (vars-by-type 'E asn))))))))
-                                (not (and ,@(map eq-to-prev (vars-by-type 'E asn))))))])
+               (let* ([res (if (null? (vars-by-type 'E asn))
+                             (begin
+                             (pretty-print 'no-xrps!
+                             `(assert false)))
+                             `(assert 
+                                (or 
+                                  (and 
+                                    ,@(let* ([E-eq-to-prev (map eq-to-prev (vars-by-type 'E asn))])
+                                        (if (null? E-eq-to-prev) '(true) E-eq-to-prev))
+                                    (not (and ,@(let* ([existing-X-eq-to-prev
+                                                         (map eq-to-prev (map (lambda (v) (assoc v asn)) (map exist-var->xrp-var (map car (filter-true (vars-by-type 'E asn))))))])
+                                                  (if (null? existing-X-eq-to-prev) '(true)
+                                                    existing-X-eq-to-prev))))
+                                    (and ,@(let* ([nonexist-X-eq-to-prev 
+                                                    (map eq-to-prev (map (lambda (v) (assoc v asn)) (map exist-var->xrp-var (map car (filter-false (vars-by-type 'E asn))))))])
+                                             (if (null? nonexist-X-eq-to-prev) '(true)
+                                               nonexist-X-eq-to-prev))))
+                                  (not (and ,@(map eq-to-prev (vars-by-type 'E asn)))))))])
                  res))
 
              (define (get-assignment-score assignment)
@@ -725,7 +744,8 @@
                                         (equal? "S" (substring (symbol->string (car var-val)) 
                                                                0 1)))
                                       assignment)])
-                 (apply + (map cadr scores))))
+                 (if (null? scores) 0.0
+                   (apply + (map cadr scores)))))
 
              (define (loop curr-depth state must-check do-not-check sols postprocessed-sols)
                (pretty-print `(loop depth ,curr-depth solutions ,(length sols)))
@@ -751,13 +771,17 @@
                             [valid-results (map (lambda (v) (check-state state (append (list `(assert (= ,v true)))
                                                                                        (make-assertion-constraint 'false state))))
                                                 recursion-variables)]
-                            [valid-variables (map cdr (filter car (map (lambda (r v) (cons (not (sat? r)) v)) valid-results recursion-variables)))]
+                            [potential-valid (map cdr (filter car (map (lambda (r v) (cons (not (sat? r)) v)) valid-results recursion-variables)))]
+
+                            [valid-variables 
+                              (map cdr (filter car
+                                           (map (lambda (r v) (cons (sat? r) v))
+                                                (map (lambda (v) (check-state state (append (list `(assert (= ,v true))) (make-assertion-constraint 'true state))))
+                                                     potential-valid) potential-valid)))]
+
                             [valid-scores (map (lambda (v)
                                                  (get-assignment-score 
-                                                   (check-state state 
-                                                                (append 
-                                                                  (list `(assert (= ,v true))) 
-                                                                  (make-assertion-constraint 'true state)))))
+                                                   (check-state state (append (list `(assert (= ,v true))) (make-assertion-constraint 'true state)))))
                                                valid-variables)]
                             [valid-postprocessed (map (lambda (s) `(rec . ,s))
                                                       valid-scores)]
@@ -811,7 +835,6 @@
                      
                      )))
              (loop 0 initial-state '() '() '() '()))
-
            (search max-depth initial-state))
 
          (define (smt-solve max-depth body type-map)
@@ -1118,6 +1141,4 @@
            (define initial-mcmc-state (make-mcmc-state initial-prog-state initial-assignment initial-score))
 
            (smt-mh-loop num-samples max-search-depth initial-mcmc-state))
-
-
          )
