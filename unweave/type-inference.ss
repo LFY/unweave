@@ -51,7 +51,7 @@
         
 ;; (define (dpp x) '())
 
-(define DEBUG #f)
+(define DEBUG #t)
 (define (dpp x) 
   (if DEBUG (pretty-print x)))
 
@@ -218,6 +218,42 @@
   (append var-vals tenv))
 
 ;; The abstract interpreter
+
+;; Hack to clean up mistakes
+(define (clean-types expr start-tenv label-type-map)
+  (define (more-specific a b) (if (type-variable? a) b a))
+  (define label-type-table (alist->hash-table label-type-map))
+  (define (C ex tenv)
+    (cond [(if? ex) (explode-if ex (lambda (l c t e)
+                                     (begin
+                                       (C c tenv)
+                                       (C t tenv)
+                                       (C e tenv))))]
+          [(lambda? ex) (explode-lambda ex (lambda (l vs c)
+                                             (C c (append (map (lambda (v) (cons v 'T0)) vs) tenv))))]
+          [(letrec? ex) (explode-letrec ex (lambda (l bs c)
+                                             (let* ([local-binding-env (fold (lambda (b e)
+                                                                               (let* ([v (car b)]
+                                                                                      [t (cadr b)]
+                                                                                      [c* (C t (tenv-ext e v 'T0))])
+                                                                                 (tenv-ext e v c*)))
+                                                                             tenv
+                                                                             bs)])
+                                               (C c local-binding-env))))]
+          [(call? ex) (explode-call ex (lambda (l f vs) 
+                                         (C f tenv)
+                                         (for-each (lambda (v) (C v tenv)) vs)
+                                         (hash-table-ref label-type-table l)))]
+          [(ref? ex) (let* ([from-env (tenv-lkup tenv (ref->var ex))]
+                            [from-table (hash-table-ref label-type-table (ref->lab ex))]
+                            [res (more-specific from-env from-table)])
+                       (hash-table-set! label-type-table (ref->lab ex) res)
+                       res)]
+          [(const? ex) (hash-table-ref label-type-table (const->lab ex))]
+          [else ex]))
+  (begin
+    (C expr start-tenv)
+    (hash-table->alist label-type-table)))
 
 (define (infer-types expr tenv)
 
@@ -426,11 +462,11 @@
                                           (fold (lambda (b e)
                                                   (let* ([Bv (next-type-variable!)]
                                                          [void (set! forbidden-free (cons Bv forbidden-free))]
-                                                         [new-type (make-type-scheme '() Bv)]
+                                                         [new-type (make-type-scheme `() Bv)]
+                                                         [void (dpp `(before-adding-binding ,(car b) ,Bv))]
                                                          [b-type (generalize (lambda () (T (cadr b) (tenv-ext e (car b) new-type))))])
                                                     (unify! Bv (type-scheme-body b-type))
-                                                    (dpp `(adding-binding ,(car b)))
-                                                    (dpp `(generalized: ,b-type))
+                                                    (dpp `(adding-binding ,(car b) ,b-type ,Bv))
                                                     (tenv-ext e (car b) b-type)))
                                                 env bs)]
                                         [void (dpp 'letrec-after-bindings)]
@@ -475,7 +511,10 @@
                   (dpp `(unrecognized: ,ex))
                   'wtf)]))
 
-  (list
-    (tv-sub tve (T expr tenv*))
-    (tv-sub-all)
-    (hash-table->alist tve))))
+  (let* ([this-type (tv-sub tve (T expr tenv*))]
+         [other-types (tv-sub-all)]
+         [final-tve (hash-table->alist tve)]
+         [other-types* (clean-types expr tenv* other-types)])
+    (list this-type other-types* final-tve)))
+
+)
