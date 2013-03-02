@@ -13,7 +13,7 @@
 
  (import (rnrs)
          (rnrs eval)
-         (only (scheme-tools) system format)
+         (only (scheme-tools) system format pretty-print)
          (only (ikarus) fork waitpid read-line with-input-from-string))
 
  (define (new-file-id)
@@ -47,26 +47,35 @@
      (system (format "z3 -smt2 ~s > ~s"
                      z3-script-file
                      z3-output-file))
-     (let* ([lines (readlines z3-output-file)]
+     (let* (
+            ;; [void (begin (display 'start-read) (display z3-output-file) (newline))]
+            [lines (readlines z3-output-file)]
+            ;; [void (begin (display 'end-read) (newline))]
             [sat-unsat (string->symbol (car lines))]
             [assignment (let loop ([todo (cdr lines)]
                                    [acc ""])
                           (if (null? todo) acc
                               (loop (cdr todo)
-                                    (string-append acc (car todo)))))]
-            [assignment-expr (with-input-from-string assignment read)])
+                                    (string-append acc "\n" (car todo)))))]
+            ;; [void (begin (display 'read-asn) (newline))]
+            ;; [void (display assignment)]
+            [assignment-expr (with-input-from-string assignment read)]
+            ;; [void (begin (display 'done-reading) (newline))]
+            )
        (system (format "rm ~s" z3-script-file))
        (system (format "rm ~s" z3-output-file))
        ;; (display `(z3-run ,sat-unsat)) (newline)
        (list sat-unsat assignment-expr))))
 
  (define (z3-result->assignment assignment-expr)
+
    (define (convert-val v)
      (cond [(pair? v)
             (eval `(let ()
                      (define nil '())
                      (define Int '())
                      (define Real '())
+                     (define Clo '())
                      (define (Lst . xs) '())
                      (define (as . xs) (car xs))
                      (define answer ,v)
@@ -82,7 +91,10 @@
             [final-type (if (null? arg-types) result-type
                             `(,@arg-types ,result-type))])
        (list var-name val final-type)))
-   (map decl->var-val-type assignment-expr))
+   ;; (pretty-print assignment-expr)
+   (map decl->var-val-type 
+        ;; assignment-expr))
+        (filter (lambda (e) (and (not (equal? (car e) 'declare-fun)) (not (equal? (car e) 'forall)) (null? (caddr e)))) assignment-expr)))
 
 
  )

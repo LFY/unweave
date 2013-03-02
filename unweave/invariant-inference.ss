@@ -375,7 +375,7 @@
                                                                                                                  (arrow-type-res acc))
                                                                                                                template+vars
                                                                                                                vs*))))))))))]
-                   [(assert? e) (explode-assert e (lambda (l prog constr) (I prog env)))]
+                   [(assert? e) (explode-assert e (lambda (l prog constr) (I prog env)))] ;; How to handle assertions in liquid types?
                    [(letrec? e) (explode-letrec e (lambda (l bs c)
                                                     (let* ([template (get-template! l)]
                                                            [other-constraints '()]

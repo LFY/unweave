@@ -370,23 +370,24 @@
                                                                                                                vals)]
                                                                                           [recursion-definition `(assert (=> ,Rv (= ,Vv ,(if (null? vals) Fv `(,Fv ,@converted-vals)))))]
 
+                                                                                          [valid-invariant? (lambda (t) (and (arrow-type? t) (template? (get-return-type t))))]
                                                                                           [invariant (let* ([lookup-res (assoc (lambda->lab lam) label-invariant-map)])
                                                                                                        (if lookup-res
-                                                                                                         (let* ([inv-body (cdr lookup-res)])
-                                                                                                           (if (template? inv-body)
-                                                                                                             (if (equal? inv-body '(and)) 'true inv-body)
-                                                                                                             '()))
+                                                                                                         (if (valid-invariant? (cdr lookup-res))
+                                                                                                           (if (equal? (cdr lookup-res) '(and)) 'true (cdr lookup-res))
+                                                                                                           '())
                                                                                                          '()))]
-                                                                                          [invariant-vars (letrec ([is-var? (lambda (e) (and (symbol? e)
-                                                                                                                                             (assoc e env)))]
+                                                                                          ;; [void (pretty-print `(resulting-invariant ,invariant))]
+                                                                                          [invariant-vars (letrec ([is-var? (lambda (e) (and (symbol? e) (assoc e combined-env)))]
                                                                                                                    [get-vars (lambda (e)
                                                                                                                      (cond [(pair? e) (apply append (map get-vars (cdr e)))] 
                                                                                                                            [(symbol? e) (if (is-var? e) (list e) '())]
                                                                                                                            [else '()]))])
                                                                                                             (get-vars invariant))])
+                                                                                     ;; (pretty-print `(inv-vars ,invariant-vars))
                                                                                      (if (not (null? invariant)) ;; the invariant is going to be of function type.
                                                                                        (add-stmt! `(assert ,(search-and-replace `((V . ,Vv) 
-                                                                                                                                  ,@(map (lambda (v) `(v . ,(lookup env v))) invariant-vars)) 
+                                                                                                                                  ,@(map (lambda (v) `(,v . ,(lookup combined-env v))) invariant-vars)) 
                                                                                                                                 (cadr (get-return-type invariant)))))
                                                                                        '())
 
@@ -442,7 +443,6 @@
 
                                                                                          (inst-type! Fv type-used-here)
                                                                                          (inst-type! Vv (get-return-type type-used-here))))
-                                                                                       ;;(lookup-type (lambda->lab lam)))
 
                                                                                      (inst-lazy-val! Vv `(,(addr->func-name (list (lambda->lab lam))) ,@vals))
 
@@ -469,13 +469,12 @@
                                                          (if lazy?
                                                            Vv
                                                            (begin
-                                                             (if (all (lambda (x) (not (lazy-var? x)))
-                                                                      vals)
+                                                             (if (all (lambda (x) (not (lazy-var? x))) vals)
                                                                (inst-val-type! Vv (apply proc (map (lambda (v) (if (var? v) (get-val v) v))
                                                                                                    vals))))
                                                              Vv)))]
                                                       [else 
-                                                        (pretty-print `(error-in-call-norm-eval ,proc)) ]))))]
+                                                        (pretty-print `(error-in-call-norm-eval ,proc))]))))]
                [(ref? ex) (let* ([lookup-res (lookup env (ref->var ex))])
                             (if (not-found? lookup-res) 
                               (cond [(rv? lookup-res)
@@ -721,8 +720,8 @@
 
                (let* ([res (if (null? (vars-by-type 'E asn))
                              (begin
-                             (pretty-print 'no-xrps!
-                             `(assert false)))
+                               (pretty-print 'no-xrps!
+                                             `(assert false)))
                              `(assert 
                                 (or 
                                   (and 
@@ -747,8 +746,10 @@
                  (if (null? scores) 0.0
                    (apply + (map cadr scores)))))
 
+             
+
              (define (loop curr-depth state must-check do-not-check sols postprocessed-sols)
-               (pretty-print `(loop depth ,curr-depth solutions ,(length sols)))
+               (pretty-print `(loop depth ,curr-depth branches-to-check ,must-check solutions ,postprocessed-sols))
                (if (> curr-depth max-depth)
                  `(passed-max-depth-stop ,postprocessed-sols)
                  (let* ([solve-result (check-state state (append (map make-ineq-sol sols)
@@ -767,47 +768,48 @@
 
                      ;; for each live recursion variable, check for validity, unsatisfiability, or somewhere in between.
                      ;; then advance the state along the parts "in-between"
-                     (let* ([recursion-variables (filter (lambda (v) (not (member v do-not-check))) (get-live-recursion-variables state))]
-                            [valid-results (map (lambda (v) (check-state state (append (list `(assert (= ,v true)))
-                                                                                       (make-assertion-constraint 'false state))))
-                                                recursion-variables)]
-                            [potential-valid (map cdr (filter car (map (lambda (r v) (cons (not (sat? r)) v)) valid-results recursion-variables)))]
+                     (if (not (null? must-check))
+                       (loop curr-depth (advance-state-along! (car must-check) state) (cdr must-check) do-not-check sols postprocessed-sols)
+                       (let* ([recursion-variables (filter (lambda (v) (not (member v do-not-check))) (get-live-recursion-variables state))]
+                              [valid-results (map (lambda (v) (check-state state (append (list `(assert (= ,v true)))
+                                                                                         (make-assertion-constraint 'false state))))
+                                                  recursion-variables)]
+                              [potential-valid (map cdr (filter car (map (lambda (r v) (cons (not (sat? r)) v)) valid-results recursion-variables)))]
 
-                            [valid-variables 
-                              (map cdr (filter car
-                                           (map (lambda (r v) (cons (sat? r) v))
-                                                (map (lambda (v) (check-state state (append (list `(assert (= ,v true))) (make-assertion-constraint 'true state))))
-                                                     potential-valid) potential-valid)))]
-
-                            [valid-scores (map (lambda (v)
-                                                 (get-assignment-score 
-                                                   (check-state state (append (list `(assert (= ,v true))) (make-assertion-constraint 'true state)))))
-                                               valid-variables)]
-                            [valid-postprocessed (map (lambda (s) `(rec . ,s))
-                                                      valid-scores)]
-                            [unsat-results (map (lambda (v) (check-state state (append (list `(assert (= ,v true)))
-                                                                                       (make-assertion-constraint 'true state))))
-                                                recursion-variables)]
-                            [unsat-variables (map cdr (filter car (map (lambda (r v) (cons (not (sat? r)) v)) unsat-results recursion-variables)))]
-                            [to-check (filter (lambda (v)
-                                                (and (not (member v valid-variables))
-                                                     (not (member v unsat-variables))))
-                                              recursion-variables)])
-                       (if (and (null? must-check) (null? to-check))
-                         `(exhausted ,(append valid-postprocessed postprocessed-sols))
-                         (if (null? to-check)
-                           (loop (+ 1 curr-depth) 
-                                 (advance-state-along! (car must-check) state) 
-                                 (cdr must-check) 
-                                 (append valid-variables unsat-variables do-not-check) 
-                                 sols 
-                                 (append valid-postprocessed postprocessed-sols))
-                           (loop (+ 1 curr-depth) 
-                                 (advance-state-along! (car to-check) state) 
-                                 (append (cdr to-check) must-check) 
-                                 (append valid-variables unsat-variables do-not-check) 
-                                 sols 
-                                 (append valid-postprocessed postprocessed-sols))))))
+                              [valid-variables (map cdr (filter car (map (lambda (r v) (cons (sat? r) v)) 
+                                                                         (map (lambda (v) (check-state state (append (list `(assert (= ,v true))) (make-assertion-constraint 'true state)))) potential-valid)
+                                                                         potential-valid)))]
+                              [invalid (filter (lambda (v) (not (member v valid-variables))) potential-valid)]
+                              [valid-scores (map (lambda (v)
+                                                   (get-assignment-score 
+                                                     (check-state state (append (list `(assert (= ,v true))) (make-assertion-constraint 'true state)))))
+                                                 valid-variables)]
+                              [valid-postprocessed (map (lambda (s) `(rec . ,s)) valid-scores)]
+                              [unsat-results (map (lambda (v) (check-state state (append (list `(assert (= ,v true)))
+                                                                                         (make-assertion-constraint 'true state))))
+                                                  recursion-variables)]
+                              [unsat-variables (append (map cdr (filter car (map (lambda (r v) (cons (not (sat? r)) v)) unsat-results recursion-variables))))]
+                              [to-check (filter (lambda (v)
+                                                  (and (not (member v valid-variables))
+                                                       (not (member v unsat-variables))))
+                                                recursion-variables)])
+                         (if (and (null? must-check) (null? to-check))
+                           `(exhausted ,(append valid-postprocessed postprocessed-sols))
+                           (if (null? to-check)
+                             `(done ,(append valid-postprocessed postprocessed-sols))
+                             (loop (+ curr-depth 1)
+                                   (advance-state-along! (car to-check) state) 
+                                   (append (cdr to-check) must-check)
+                                   (append valid-variables unsat-variables do-not-check)
+                                   sols 
+                                   (append valid-postprocessed postprocessed-sols)))
+                           ;; '(loop (+ 1 curr-depth) 
+                           ;;       (advance-state-along! (car to-check) state) 
+                           ;;       (append (cdr to-check) must-check) 
+                           ;;       (cons (car to-check) (append valid-variables unsat-variables do-not-check) )
+                           ;;       sols 
+                           ;;       (append valid-postprocessed postprocessed-sols))
+                           ))))
                     ;;    (loop (+ 1 curr-depth) (advance-along (car to-check)) (append (cdr to-check) must-checl)
                     ;;    (letrec ([loop2 (lambda (rest)
                     ;;                      (let* ([v (car rest)])
