@@ -12,30 +12,6 @@
         (unweave type-inference)
         (unweave invariant-inference))
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 ;; Geometric
 
 (define expr2
@@ -57,22 +33,6 @@
                                          (letrec ([rest (cdr xs*)]) (sum-list rest)))))])
                                     (= (sum-list ns) 6))))))
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-              
 (define transformed-expr (anf (label-transform expr2)))
 
 (pretty-print transformed-expr)
