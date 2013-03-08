@@ -13,30 +13,65 @@
         (unweave invariant-inference))
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ;; Geometric
 
 (define expr2
-  '(assert
-     (letrec ([list-map (lambda (f xs)
-                          (if (null? xs) '()
-                            (cons (f (car xs))
-                                  (list-map f (cdr xs)))))]
-              [random-list (lambda ()
-                             (if (xrp 1 1 1 #t #f) '()
-                               (cons (xrp 1 1 1 2 3)
-                                     (random-list))))])
-       (list-map (lambda (x) 
-                   (letrec ([smp (xrp 1 1 1 0 1)])
-                     (+ x smp)))
-                 (random-list)))
-     (lambda (xs) 
-       (letrec ([sum-list 
-                  (lambda (xs)
-                    (if (null? xs) 0
-                      (+ (car xs) 
-                         (sum-list (cdr xs)))))])
-         (and (= (car xs) (car (cdr xs)))
-              (< (sum-list xs) 10))))))
+  '(letrec ([list-map (lambda (f xs)
+                        (if (null? xs) '()
+                          (cons (f (car xs))
+                                (list-map f (cdr xs)))))]
+            [random-list (lambda ()
+                           (if (xrp 1 1 1 #t #f) '()
+                             (cons (xrp 1 1 1 1 2 3 4 5 6)
+                                   (random-list))))]
+            [numbers (random-list)])
+     (assert numbers (lambda (ns) 
+                       (letrec ([sum-list 
+                                  (lambda (xs*) 
+                                    (if (null? xs*) 
+                                      0 
+                                      (+ (car xs*) 
+                                         (letrec ([rest (cdr xs*)]) (sum-list rest)))))])
+                                    (= (sum-list ns) 6))))))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
               
 (define transformed-expr (anf (label-transform expr2)))
 
