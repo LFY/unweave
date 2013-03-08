@@ -89,10 +89,7 @@
                                                    (if ,(next-lab!) (ref ,(next-lab!) ,cv)
                                                      ,(reset (A t))
                                                      ,(reset (A e)))))))]
-                   [(assert? e) (explode-assert e (lambda (l prog constr)
-                                                    `(assert ,l 
-                                                             ,(reset (A prog))
-                                                             ,(reset (A constr)))))]
+                   [(assert? e) (explode-assert e (lambda (l prog constr) (reset (reset `(assert ,l ,(A prog) ,(A constr))))))]
                    [(call? e) (explode-call e (lambda (l f as)
                                                 (if (null? as) e
                                                   (let* ([new-f-var (if (ref? f) '() (next-var!))]
@@ -260,7 +257,9 @@
            (define (lkup v env)
              (let* ([res (assoc v env)])
                (if (equal? #f res)
-                 'not-found
+                 (begin
+                   (pretty-print `(err-not-found ,v))
+                   'not-found)
                  (cdr res))))
 
            (define (ext var val env)
@@ -375,7 +374,23 @@
                                                                                                                  (arrow-type-res acc))
                                                                                                                template+vars
                                                                                                                vs*))))))))))]
-                   [(assert? e) (explode-assert e (lambda (l prog constr) (I prog env)))] ;; How to handle assertions in liquid types?
+
+                   [(assert? e) (explode-assert e (lambda (l prog constr) (I prog env)))]
+                   ;; [(assert? e) (explode-assert e (lambda (l prog constr) (I `(call ,l ,constr ,prog) env)))]
+                                                    ;; (let* ([pct (I prog env)] 
+                                                    ;;        [cct (I constr env)]
+                                                    ;;        [c-template (ret->template cct)]
+                                                    ;;        [c-template* (if (template? c-template) (caddr c-template) c-template)]
+                                                    ;;        [c-res-template (arrow-type-res c-template*)]
+                                                    ;;        [sub-constr 
+                                                    ;;          `(substitute ,(map (lambda (v x) `(,v ,(de-label x '()))) 
+                                                    ;;                             (extract-vars (list prog) c-template*) (list prog)) 
+                                                    ;;                       ,c-res-template)])
+                                                    ;;   (cons (car pct)
+                                                    ;;         (append 
+                                                    ;;                 (cdr pct)
+                                                    ;;                 (cdr cct))))))]
+                                                    ;; (I `(call ,l ,constr ,prog) env)))]
                    [(letrec? e) (explode-letrec e (lambda (l bs c)
                                                     (let* ([template (get-template! l)]
                                                            [other-constraints '()]
@@ -872,16 +887,16 @@
                        (begin 
                          ;;(pretty-print `(x: ,x))
                          (and
-                           (not (poly? x))
+                           ;; (not (poly? x))
                            (not (arrow-binding? x))
                            (not (unit? x)))))
                      env))
            (define (transform-guards env)
              (map (lambda (binding)
                     (cond 
-                      [(template-binding? binding) (cons (car binding) (transform-template (car binding) (cdr binding)))]
-                      [(refinement-binding? binding) (cons (car binding) (transform-refinement (car binding) (cdr binding)))]
-                      [(guard-predicate? binding) (cons (car binding) (transform-guard-predicate (cdr binding)))]
+                      [(template-binding? binding) (cons (car binding) (disambiguate-nil (transform-template (car binding) (cdr binding))))]
+                      [(refinement-binding? binding) (cons (car binding) (disambiguate-nil (transform-refinement (car binding) (cdr binding))))]
+                      [(guard-predicate? binding) (cons (car binding) (disambiguate-nil (transform-guard-predicate (cdr binding))))]
                       [else binding]))
                   env))
 
@@ -903,26 +918,57 @@
                         conj))]
                    [else constr]))
 
-           (define (remove-polymorphic-clauses env)
-             (define (not-polymorphic? binding)
                (define (is-var? v) (and (symbol? v) (assoc v var-type-map)))
                (define (get-vars e)
                  (cond [(pair? e) (apply append (map get-vars (cdr e)))]
                        [(symbol? e) (if (is-var? e) (list e) '())]
                        [else '()]))
+           (define (remove-polymorphic-clauses env)
+             (define (not-polymorphic? binding)
                (let* ([expr (cdr binding)]
                       [expr-vars (get-vars expr)])
                  (not (some polymorphic? (map (lambda (x) (cdr (assoc x var-type-map)))
                                              expr-vars)))))
              (filter not-polymorphic? env))
 
+           (define (has-nil? expr)
+             (cond [(pair? expr)
+                    (or (has-nil? (car expr))
+                        (has-nil? (cdr expr)))]
+                   [(symbol? expr) (equal? 'nil expr)]
+                   [else #f]))
+
+           (define (disambiguate-nil expr-with-nil)
+             (if (has-nil? expr-with-nil)
+               (let* ([vars (get-vars expr-with-nil)]
+                      [list-typed-var (car (filter (lambda (v) (let ([t (cdr (assoc v var-type-map))])
+                                                            (if (pair? t) (equal? (car t) 'Lst)
+                                                              #f)))
+                                              vars))]
+                      [type-of-that (cdr (assoc list-typed-var var-type-map))])
+                 (search-and-replace `((nil . (as nil ,type-of-that))) expr-with-nil))
+               expr-with-nil))
+
+           (define (get-polymorphic t)
+             (cond [(type-variable? t) (list t)]
+                   [(primitive-type? t) '()]
+                   [(arrow-type? t)
+                    (append (get-polymorphic (arrow-type-arg t))
+                            (get-polymorphic (arrow-type-res t)))]
+                   [(parametric-type? t)
+                    (apply append (map get-polymorphic (cdr t)))]
+                   [else '()]))
+
+
            (map (lambda (constraint constraint-type)
-                  (let* ([env (map (lambda (var-val)
+                  (let* ([sorts-to-declare '()]
+                         [env (map (lambda (var-val)
                                      `(,(car var-val) . ,(L (cdr var-val))))
                                    (car constraint))]
                          ;; [void (pretty-print `(dirty-env ,env))]
                          [cleaned-env (transform-guards (remove-irrelevant-bindings env))]
-                         [cleaned-env* (remove-polymorphic-clauses cleaned-env)]
+                         ;; [cleaned-env* (remove-polymorphic-clauses cleaned-env)]
+                         [cleaned-env* ((lambda (x) x) cleaned-env)]
                          ;; [void (pretty-print `(clean-env ,cleaned-env))]
                          [as-EUFA-conj (if (null? cleaned-env*) 'true
                                          (cons 'and (map (lambda (e)
@@ -933,16 +979,44 @@
                        (decls
                          ,@(if (not (polymorphic? constraint-type))
                              (list `(declare-const V ,constraint-type)) 
-                             '())
-                         ,@(map (lambda (var-val)
-                                  `(declare-const ,(car var-val) ,(cdr (assoc (car var-val) var-type-map))))
-                                (filter (lambda (binding)
-                                          (and (if (assoc (car binding) var-type-map) 
-                                                 (not (polymorphic? (cdr (assoc (car binding) var-type-map))))
-                                                 #t)
-                                               (not (equal? 'unit (car binding)))
-                                               (not (guard-predicate? binding))))
-                                        cleaned-env*)))
+                             (let* ([sorts (get-polymorphic constraint-type)])
+                               (for-each (lambda (sort)
+                                           (if (not (assoc sort sorts-to-declare))
+                                             (set! sorts-to-declare (cons
+                                                                      (cons sort `(declare-sort ,sort 0))
+                                                                      sorts-to-declare))))
+                                         sorts)
+                               (append
+                                 (map (lambda (s) (cdr (assoc s sorts-to-declare)))
+                                      sorts)
+                                 (list `(declare-const V ,constraint-type)))))
+                         ,@(apply append (map (lambda (var-val)
+                                                (let* ([type (cdr (assoc (car var-val) var-type-map))])
+                                                  (if (arrow-type? type) '()
+                                                    (if (not (polymorphic? type))
+                                                      (list `(declare-const ,(car var-val) ,type))
+                                                      (let* ([sorts (get-polymorphic type)])
+                                                        '(for-each (lambda (sort)
+                                                                     (if (not (assoc sort sorts-to-declare))
+                                                                       (set! sorts-to-declare (cons sort `(declare-sort ,sort 0)))))
+                                                                   sorts)
+                                                        (append
+                                                          (apply append (map (lambda (s) 
+                                                                               (if (not (assoc s sorts-to-declare))
+                                                                                 (begin
+                                                                                   (set! sorts-to-declare (cons (cons s `(declare-sort ,s 0))
+                                                                                                                sorts-to-declare))
+                                                                                   (list `(declare-sort ,s 0)) )
+                                                                                 '()))
+                                                                             sorts))
+                                                          (list `(declare-const ,(car var-val) ,type))))))))
+                                              (filter (lambda (binding)
+                                                        (and 
+                                                          ;; (if (assoc (car binding) var-type-map) (not (polymorphic? (cdr (assoc (car binding) var-type-map)))) #t)
+                                                          (not (arrow-type? (cdr binding)))
+                                                          (not (equal? 'unit (car binding)))
+                                                          (not (guard-predicate? binding))))
+                                                      cleaned-env*))))
                        (body
                          (entail 
                            ,as-EUFA-conj

@@ -7,7 +7,8 @@
  (export label-transform
          de-label
          de-label-env
-         free-variables)
+         free-variables
+         referenced-variables)
 
  (import (rnrs)
          (scheme-tools srfi-compat :1)
@@ -95,7 +96,35 @@
         (null? sexpr)) `(const ,(next-label) ,sexpr)]
       [else `(const ,(next-label) ,sexpr)] ))
    (label sexpr))
-
+(define (referenced-variables expr bound primitive-env)
+    (define test-env (map list bound))
+    (define free '())
+    (define (E ex env)
+      (cond [(if? ex) (explode-if ex (lambda (l c t e) `(if ,(E c env) ,(E t env) ,(E e env))))]
+            [(or (factor-closure? ex) (closure? ex)) (explode-closure (lambda (l e2)
+                                              (E l (append e2 env))))]
+            [(lambda? ex) (explode-lambda ex (lambda (l vs c) `(lambda ,vs ,(E c (append (map (lambda (v) (list v)) vs) env)))))]
+            [(letrec? ex) (explode-letrec ex (lambda (l bs call) (let* ([local-binding-env (fold (lambda (b e) (extend e (car b) (E (cadr b) e))) env bs)])
+                                                                   (E call local-binding-env))))]
+            [(call? ex) (explode-call ex (lambda (l f vs) (begin (E f env) (map (lambda (e) (E e env)) vs))))]
+            [(ref? ex) (set! free (cons (ref->var ex) free))]
+            [(xrp? ex) (explode-xrp ex (lambda (l s n p ps)
+                                         (for-each (lambda (x)
+                                                     (E x env))
+                                                   ps)))]
+            [(xrps? ex) (explode-xrps ex (lambda (l s n p ps)
+                                           (for-each (lambda (x)
+                                                       (E x env))
+                                                     ps)))]
+            [(xrp+init? ex) (explode-xrp+init ex (lambda (l s n p initval ps)
+                                                   (for-each (lambda (x)
+                                                               (E x env))
+                                                             (cons initval ps))))]
+            [(const? ex) '()]
+            [else '()]) )
+    (begin
+      (E expr test-env)
+      free))
  ;; Delabeling transform=========================================================
  (define (free-variables expr bound primitive-env)
    (define test-env (map list bound))

@@ -478,7 +478,7 @@
                                                          [void (dpp `(before-adding-binding ,(car b) ,Bv))]
                                                          [b-type (generalize (lambda () (T (cadr b) (tenv-ext e (car b) new-type))))])
                                                     (unify! Bv (type-scheme-body b-type))
-                                                    (dpp `(adding-binding ,(car b) ,b-type ,Bv))
+                                                    (dpp `(adding-binding ,l ,(car b) ,b-type ,Bv))
                                                     (tenv-ext e (car b) b-type)))
                                                 env bs)]
                                         [void (dpp 'letrec-after-bindings)]

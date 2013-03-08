@@ -21,6 +21,8 @@
        (and (car xs) (loop (cdr xs)))))
    (loop bs))
 
+ (define (my-not x) (not x))
+
  (define default-env
    `((+ . ,+)
      (- . ,-)
@@ -40,6 +42,7 @@
 
      (or . ,my-or)
      (and . ,my-and)
+     (not . ,my-not)
      (list . ,list)
      (list-ref . ,list-ref)
      (cons . ,cons)

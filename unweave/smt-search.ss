@@ -41,6 +41,13 @@
              f-type))
          ;; Our state
          (define (smt-evaluator ex env addr label-type-map label-invariant-map)
+
+           (define type-var-ctr 0)
+           (define (fresh-type-variable!)
+             (let* ([res (string->symbol (string-append "T000" (number->string type-var-ctr)))])
+               (set! type-var-ctr (+ 1 type-var-ctr))
+               res))
+
            (define (lookup-type lab)
              (cdr (assoc lab label-type-map)))
 
@@ -49,7 +56,10 @@
            (define (rv? v) (and (smt-variable? v) (equal? 'X (first-letter v))))
 
            ;; Parametric types
-           (define (type-parameter? s) (member s '(A B C D E F G H I J K L M)))
+           (define (type-parameter? s) (and (symbol? s)
+                                            (or (member s '(A B C D E F G H I J K L M))
+                                                (member s '(a b c d e f g h i j k l m))
+                                                (equal? "T" (substring (symbol->string s) 0 1)))))
 
            (define (contains-type-parameter? t)
              (if (null? t) #f
@@ -132,7 +142,7 @@
              (let* ([result (cond [(pair? val) (if (proper-list? val) 
                                                  (list->ground-type val)
                                                  (improper-list->ground-type val))]
-                                  [(null? val) '(Lst A)]
+                                  [(null? val) `(Lst ,(fresh-type-variable!))]
                                   [(number? val) (cond [(exact? val) 'Int]
                                                        [(inexact? val) 'Real]
                                                        [else 'Real])]
@@ -215,7 +225,7 @@
 
            ;; Fills in the return type for a function call f(x1, ... xn)
            ;; Uses specialized inference rules.
-           (define (infer-return-type prim var-vals) 
+           (define (infer-return-type ret-var prim var-vals) 
              (let* ([types (map (lambda (var-val)
                                   (if (var? var-val)
                                     (get-type var-val)
@@ -245,9 +255,7 @@
                                              (cadr type)))]
                      [(equal? prim 'null?) 'Bool]
                      [(member prim '(> < = <= >=)) 'Bool]
-                     [else (begin
-                             ;; (pretty-print `(unknown: (,prim ,@var-vals)))
-                             'UNKNOWN-TYPE)])))
+                     [else 'UNKNOWN-TYPE])))
 
            ;; Converts primitives in Scheme to their SMT counterparts.
            (define (convert-prim f args)
@@ -272,7 +280,60 @@
            ;; (define fvar->poly-instance-table (make-hash-table equal?))
            
            ;; Evaluator: Like a Scheme interpreter, but contains parameters for whether it is lazy (to enable incremental execution), and tracks the control-environment, which is the current set of control flow choices.
-           
+         
+           ;; 
+           (define (unify-types! v1 v2)
+             (define tv-ctr 0)
+             (define (next-tv!)
+               (let* ([res (string->symbol (string-append "T" "00" (number->string tv-ctr)))])
+                 (set! tv-ctr (+ 1 tv-ctr))
+                 res))
+             (define (normalize-parameters t)
+               (cond [(parametric-type? t) `(,(car t) ,(map normalize-parameters (cdr t)))]
+                     [(arrow-type? t) `(-> ,(normalize-parameters (arrow-type-arg t))
+                                           ,(normalize-parameters (arrow-type-res t)))]
+                     [(type-parameter? t) (next-tv!)]
+                     [else t]))
+             (let* ([type-of-v1 (hash-table-ref var-type-map v1 (lambda () 'T999))]
+                    [type-of-v2 (hash-table-ref var-type-map v2 (lambda () 'T1000))]
+                    [unified (unify type-of-v1 type-of-v2 (make-TVE))]
+                    [most-specific (tv-sub unified type-of-v1)])
+               ;; (pretty-print `(unify-attempt ,type-of-v1 ,type-of-v2))
+               most-specific))
+
+           (define unification-targets '())
+           (define (add-unification! v1 v2) (set! unification-targets (cons (cons v1 v2) unification-targets)))
+
+           (define fv-pairs '())
+           (define (add-fv-pair! fv vv) (set! fv-pairs (cons (cons vv fv) fv-pairs)))
+
+           (define overall-TVE (make-TVE))
+
+           (define (re-unify-fv-pairs! vv)
+             (if (not (assoc vv fv-pairs)) '()
+               (let* ([fv (cdr (assoc vv fv-pairs))]
+                      [fvt (hash-table-ref var-type-map fv)]
+                      [ret (get-return-type fvt)]
+                      [re-unified-ret-asn (unify ret 
+                                                 (hash-table-ref var-type-map vv) 
+                                                 (make-TVE))]
+                      [fvt* (tv-sub re-unified-ret-asn fvt)])
+                 (hash-table-set! var-type-map fv fvt*))))
+
+           (define (re-unify! v1 v2)
+             (let* ([t1 (hash-table-ref var-type-map v1)]
+                    [t2 (hash-table-ref var-type-map v2)]
+                    ;; [void (pretty-print `(re-unifying ,t1 ,t2))]
+                    [tve* (unify t1 t2 overall-TVE)])
+               ;; (pretty-print `(reunify-res ,(if (equal? 'MISMATCH tve*) tve* (hash-table->alist tve*))))
+               (set! overall-TVE tve*)))
+
+           (define (clean-types!)
+             (let* ([ks (hash-table-keys var-type-map)])
+               (for-each (lambda (k)
+                           (hash-table-set! var-type-map k (tv-sub overall-TVE (hash-table-ref var-type-map k))))
+                         ks)))
+
            (define (E ex env addr lazy? control-env) 
              (cond
                ;; Associate a SMT variable with every address.
@@ -295,7 +356,10 @@
                                             (inst-type! Rv (if (contains-type-parameter? (get-type Tv))
                                                              (get-type Ev)
                                                              (get-type Tv)))
+
                                             (if (not lazy?) (inst-val! Rv (if eval-T-lazily? (get-val Ev) (get-val Tv))))
+                                            (if (var? Tv) (re-unify! Rv Tv))
+                                            (if (var? Ev) (re-unify! Rv Ev))
                                             Rv)))]
                [(assert? ex) (explode-assert ex (lambda (l p q)
                                                   (let* ([Av (next-assert addr)]
@@ -306,12 +370,27 @@
                                                     (inst-val! Av (get-val Qv))
                                                     Pv)))]
                [(lambda? ex) (explode-lambda ex (lambda (l vs c) 
+                                                  (let* ([valid-invariant? (lambda (t) (and (arrow-type? t) (template? (get-return-type t))))]
+                                                         [invariant (let* ([lookup-res (assoc l label-invariant-map)])
+                                                                      (if lookup-res
+                                                                        (if (valid-invariant? (cdr lookup-res))
+                                                                          (if (equal? (cdr lookup-res) '(and)) 'true (cdr lookup-res))
+                                                                          '())
+                                                                        '()))]
+                                                         [invariant-vars (letrec ([is-var? (lambda (e) (and (symbol? e) (assoc e env)))]
+                                                                                  [get-vars (lambda (e)
+                                                                                              (cond [(pair? e) (apply append (map get-vars (cdr e)))] 
+                                                                                                    [(symbol? e) (if (is-var? e) (list e) '())]
+                                                                                                    [else '()]))])
+                                                                           (get-vars invariant))]
+                                                         [referenced (append invariant-vars (referenced-variables c vs '()))]
+                                                         [simplified-env (filter (lambda (vv) (member (car vv) referenced)) env)])
                                                   `(closure (lambda ,l ,vs ,c 
                                                               ,@(if (has-type-annotation? ex) 
                                                                   (list (lambda->return-type ex)) 
                                                                   '()
                                                                   )) 
-                                                            ,env)))]
+                                                            ,simplified-env))))]
                [(factor? ex) (explode-factor ex (lambda (lab formals call) 
                                                   `(factor-closure (lambda ,lab 
                                                                      ,formals
@@ -325,6 +404,10 @@
                                                                    (extend e (car b) (E (cadr b) e addr lazy? control-env)))
                                                                  env bs)]
                                                          [res (E call local-binding-env addr lazy? control-env)])
+                                                    (if (and (var? res) (contains-type-parameter? (hash-table-ref var-type-map res)))
+                                                      (let* ([t1 (hash-table-ref var-type-map res)]
+                                                             [t2 (cdr (assoc l label-type-map))])
+                                                        (set! overall-TVE (unify (hash-table-ref var-type-map res) (cdr (assoc l label-type-map)) overall-TVE))))
                                                     res)))]
                [(begin? ex) (explode-begin ex (lambda (l calls)
                                                 (letrec ([loop (lambda (next-call calls-left)
@@ -350,12 +433,6 @@
                                                                                  (if lazy?
                                                                                    ;; save a thunk that performs the next step of computation.
                                                                                    (let* ([Rv (next-recursion-flag (cons l addr))]
-                                                                                          [res-thunk (lambda () 
-                                                                                                       (hash-table-set! recur-live Rv #f)
-                                                                                                       (let* ([next-res (E (lambda->call lam) combined-env (cons l addr) #t control-env)])
-                                                                                                         (add-stmt! `(assert (= ,Vv ,next-res)))
-                                                                                                         next-res))]
-                                                                                          [void (hash-table-set! recur-thunks Rv res-thunk)]
                                                                                           [Fv (new-call-name (cons l addr))]
                                                                                           [recursion-condition `(assert (= ,Rv ,(control-env->constraint control-env)))]  
 
@@ -383,7 +460,19 @@
                                                                                                                      (cond [(pair? e) (apply append (map get-vars (cdr e)))] 
                                                                                                                            [(symbol? e) (if (is-var? e) (list e) '())]
                                                                                                                            [else '()]))])
-                                                                                                            (get-vars invariant))])
+                                                                                                            (get-vars invariant))]
+
+                                                                                          [referenced (append invariant-vars (referenced-variables (lambda->call lam) (lambda->formals lam) '()))]
+                                                                                          [simplified-env (filter (lambda (var-val) (member (car var-val) referenced)) combined-env)]
+                                                                                          [res-thunk (lambda () 
+                                                                                                       (hash-table-set! recur-live Rv #f)
+                                                                                                       (let* ([next-res (E (lambda->call lam) simplified-env (cons l addr) #t control-env)])
+                                                                                                         ;; (pretty-print `(unified2 ,Vv ,next-res ,(unify-types! Vv next-res)))
+                                                                                                         (add-stmt! `(assert (= ,Vv ,next-res)))
+                                                                                                         (if (var? next-res) (re-unify! Vv next-res))
+                                                                                                         next-res))]
+                                                                                          [void (hash-table-set! recur-thunks Rv res-thunk)]
+                                                                                          )
                                                                                      ;; (pretty-print `(inv-vars ,invariant-vars))
                                                                                      (if (not (null? invariant)) ;; the invariant is going to be of function type.
                                                                                        (add-stmt! `(assert ,(search-and-replace `((V . ,Vv) 
@@ -425,29 +514,47 @@
                                                                                          (inst-type! Fv type))
                                                                                        (let* ([type-used-here
                                                                                                 (let* ([function-type (cdr (assoc (lambda->lab lam) label-type-map))]
-                                                                                                       [arg-types (map (lambda (v)
-                                                                                                                         (cond [(var? v) (hash-table-ref var-type-map v)]
-                                                                                                                               [(closure? v) (cdr (assoc (lambda->lab (cadr v))
-                                                                                                                                                         label-type-map))]
-                                                                                                                               [else (val->type v)]))
-                                                                                                                       vals)]
+                                                                                                       [result-type (cdr (assoc l label-type-map))]
+                                                                                                       [my-tve (make-TVE)]
+                                                                                                       [arg-types (map (lambda (v) 
+                                                                                                                         (cond [(closure? v) 
+                                                                                                                                (cdr (assoc (lambda->lab (cadr v)) label-type-map))]
+                                                                                                                               [else (cdr (assoc (cadr v) label-type-map))]))
+                                                                                                                       vs)]
+                                                                                                       [arg-types2 (map (lambda (v)
+                                                                                                                          (cond [(var? v) (hash-table-ref var-type-map v)]
+                                                                                                                                [(closure? v) (cdr (assoc (lambda->lab (cadr v)) label-type-map))]
+                                                                                                                                [else (val->type v)]))
+                                                                                                                        vals)]
+                                                                                                       [next-TVE (fold (lambda (t1t2 acc)
+                                                                                                                         ;; (pretty-print `(t1t2 ,t1t2 acc ,(hash-table->alist acc)))
+                                                                                                                         (unify (car t1t2)
+                                                                                                                                (cadr t1t2)
+                                                                                                                                acc))
+                                                                                                                       my-tve
+                                                                                                                       (zip arg-types arg-types2))]
                                                                                                        [constructed-function-type
                                                                                                          (fold (lambda (next acc)
-                                                                                                                 `(-> ,next
-                                                                                                                      ,acc))
-                                                                                                               'T999RET
+                                                                                                                 `(-> ,next ,acc))
+                                                                                                               result-type
                                                                                                                (reverse arg-types))]
-                                                                                                       [var-assignment (unify function-type constructed-function-type (make-TVE))]
+                                                                                                       ;; [void (pretty-print `(unify-attempt ,function-type ,constructed-function-type))]
+                                                                                                       [var-assignment (unify function-type constructed-function-type next-TVE)]
                                                                                                        [final-type (tv-sub var-assignment function-type)])
                                                                                                   final-type)])
 
+
+                                                                                         ;; (pretty-print `(type-used-here: ,type-used-here))
                                                                                          (inst-type! Fv type-used-here)
                                                                                          (inst-type! Vv (get-return-type type-used-here))))
 
                                                                                      (inst-lazy-val! Vv `(,(addr->func-name (list (lambda->lab lam))) ,@vals))
 
                                                                                      Vv)
-                                                                                   (let* ([res (E (lambda->call lam) combined-env (cons l addr) lazy? control-env)])
+                                                                                   (let* (
+                                                                                          [referenced (referenced-variables (lambda->call lam) (lambda->formals lam) '())]
+                                                                                          [simplified-env (filter (lambda (var-val) (member (car var-val) referenced)) combined-env)]
+                                                                                          [res (E (lambda->call lam) simplified-env (cons l addr) lazy? control-env)])
                                                                                      (add-stmt! `(assert (= ,Vv ,res)))
                                                                                      (if (factor-closure? proc)
                                                                                        (let* ([Sv (next-score (cons l addr))]
@@ -459,13 +566,15 @@
                                                                                          (inst-type! Sv 'Real)
                                                                                          (add-scoring-stmt! factor-existence)
                                                                                          (add-scoring-stmt! factor-def)))
-                                                                                     (if (all (lambda (x) (not (lazy-var? x))) vals)
-                                                                                       (inst-val-type! Vv (if (var? res) (get-val res) res)))
+                                                                                     (inst-val-type! Vv (if (var? res) (get-val res) res))
+                                                                                     (if (var? res) (re-unify! Vv res))
+
                                                                                      Vv)))))]
                                                       [(procedure? proc) 
                                                        (begin
                                                          (add-stmt! `(assert (= ,Vv ,(convert-prim (ref->var f) vals))))
-                                                         (inst-type! Vv (infer-return-type (ref->var f) vals))
+                                                         (inst-type! Vv (cdr (assoc l label-type-map)))
+                                                         (inst-type! Vv (infer-return-type Vv (ref->var f) vals))
                                                          (if lazy?
                                                            Vv
                                                            (begin
@@ -477,9 +586,11 @@
                                                         (pretty-print `(error-in-call-norm-eval ,proc))]))))]
                [(ref? ex) (let* ([lookup-res (lookup env (ref->var ex))])
                             (if (not-found? lookup-res) 
-                              (cond [(rv? lookup-res)
-                                     (list-ref lookup-res 5)]
-                                    [else lookup-res])
+                              (begin
+                                (pretty-print `(not-found ,ex))
+                                (cond [(rv? lookup-res)
+                                       (list-ref lookup-res 5)]
+                                      [else lookup-res]))
                               lookup-res))]
                [(xrp? ex) (explode-xrp ex (lambda (lab scorer name prop-fx-name params)
                                             (let* ([Xv (next-choice (cons lab addr))]
@@ -504,6 +615,7 @@
                                                   c)))]
                [else ex]))
            (let* ([final-var (E ex env addr #f '())])
+             (clean-types!)
              ;; (pretty-print `(scoring ,scoring-stmts))
              (letrec ([refresh-state (lambda () 
                                        (make-state (list final-var (hash-table-ref var-val-map final-var))
@@ -554,8 +666,6 @@
                 var-vals))
 
          (define (var-type-map->declarations var-types)
-           (define (fun-arg/val->closure t)
-             (if (and (pair? t) (equal? '-> (car t))) 'Clo t))
            (map (lambda (var-type)
                   (let* ([var (car var-type)]
                          [type (cdr var-type)])
@@ -568,7 +678,8 @@
                                                                            'Clo
                                                                            (if (member (arrow-type-arg curr) '(() unit))
                                                                              '()
-                                                                             (arrow-type-arg curr))) acc))
+                                                                             (arrow-type-arg curr))) 
+                                                                         acc))
                                                              (reverse acc)))])
                                             (loop type '()))]
                                [res-type (get-return-type type)])
@@ -626,6 +737,7 @@
                   [postprocessed-extra-stmts (convert-null (convert-negative-numbers (convert-boolean-literals extra-stmts)))]
                   [decls (var-type-map->declarations (hash-table->alist (state->var-type-map state)))]
                   [header `((declare-sort Clo 0)
+                            (declare-sort A 0)
                             (declare-datatypes 
                               (T) 
                               ((Lst nil (cons (car T) (cdr Lst))))))]
@@ -719,9 +831,7 @@
                (define (filter-false asn) (filter (lambda (sol) (not (cadr sol))) asn))
 
                (let* ([res (if (null? (vars-by-type 'E asn))
-                             (begin
-                               (pretty-print 'no-xrps!
-                                             `(assert false)))
+                             `(assert false)
                              `(assert 
                                 (or 
                                   (and 
@@ -746,7 +856,16 @@
                  (if (null? scores) 0.0
                    (apply + (map cadr scores)))))
 
-             
+            
+             (define (total-prob-of state constrs)
+               (define (loop sols prob)
+                 (let* ([res (check-state state (append (map make-ineq-sol sols) constrs))])
+                   (if (sat? res)
+                     (let* ([total-prob (apply + (map cadr (filter (lambda (var-val) (equal? "S" (substring (symbol->string (car var-val)) 0 1))) res)))])
+                       (loop (cons res sols) (cons total-prob prob)))
+                     (log (apply + (map exp prob))))))
+               (loop '() '()))
+                                                                   
 
              (define (loop curr-depth state must-check do-not-check sols postprocessed-sols)
                (pretty-print `(loop depth ,curr-depth branches-to-check ,must-check solutions ,postprocessed-sols))
@@ -781,8 +900,7 @@
                                                                          potential-valid)))]
                               [invalid (filter (lambda (v) (not (member v valid-variables))) potential-valid)]
                               [valid-scores (map (lambda (v)
-                                                   (get-assignment-score 
-                                                     (check-state state (append (list `(assert (= ,v true))) (make-assertion-constraint 'true state)))))
+                                                   (total-prob-of state (append (list `(assert (= ,v true))) (make-assertion-constraint 'true state))))
                                                  valid-variables)]
                               [valid-postprocessed (map (lambda (s) `(rec . ,s)) valid-scores)]
                               [unsat-results (map (lambda (v) (check-state state (append (list `(assert (= ,v true)))
@@ -837,7 +955,10 @@
                      
                      )))
              (loop 0 initial-state '() '() '() '()))
-           (search max-depth initial-state))
+           (let* ([stop+results (search max-depth initial-state)])
+             `(,(car stop+results)
+                ,(cadr stop+results)
+                total-prob: ,(apply + (map exp (map cdr (cadr stop+results)))))))
 
          (define (smt-solve max-depth body type-map)
          ;; (define (smt-solve max-depth program constraint type-map)
